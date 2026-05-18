@@ -28,21 +28,69 @@ Optionally adapts the matrix brightness from ambient light using a
 
 ## Software prerequisites
 
-- Python 3 inside a virtualenv with `rpi-rgb-led-matrix` Python bindings
-  installed. This project assumes the venv lives at `/home/pi/rgbenv`
-  (matches the shebang in `energy_dashboard.py`). Adjust the shebang if your
-  venv is elsewhere.
-- Python packages installed in the venv:
+### 1. Build and install the RGB matrix library
 
-  ```bash
-  /home/pi/rgbenv/bin/pip install paho-mqtt pyyaml Pillow ltr559
-  ```
+This project drives the panels through
+[hzeller/rpi-rgb-led-matrix](https://github.com/hzeller/rpi-rgb-led-matrix).
+You need to build that library **and** install its Python bindings into the
+same Python environment you will run the dashboard from. Build deps first:
 
-  (`ltr559` is only needed if you use the ambient brightness sensor.)
-- I2C enabled on the Pi (only for the light sensor). Uncomment
-  `dtparam=i2c_arm=on` in `/boot/firmware/config.txt` (or `/boot/config.txt`
-  on older releases), then reboot.
-- An MQTT broker publishing your power topics.
+```bash
+sudo apt install -y python3-dev python3-pip python3-venv build-essential \
+                    libgraphicsmagick++-dev libwebp-dev cython3
+```
+
+### 2. Create a Python virtualenv
+
+The dashboard's shebang is hardcoded to `/home/pi/rgbenv` for convenience:
+
+```bash
+#!/home/pi/rgbenv/bin/python3
+```
+
+If you want a different venv path, **edit the first line of
+`energy_dashboard.py` accordingly**, or run the script through your venv's
+Python explicitly. Then create the venv (use `--system-site-packages` so that
+optional system packages like `smbus2` are visible):
+
+```bash
+python3 -m venv ~/rgbenv --system-site-packages
+~/rgbenv/bin/pip install --upgrade pip wheel
+```
+
+### 3. Compile the Python bindings into the venv
+
+```bash
+git clone https://github.com/hzeller/rpi-rgb-led-matrix.git
+cd rpi-rgb-led-matrix
+make build-python PYTHON=$HOME/rgbenv/bin/python3
+sudo make install-python PYTHON=$HOME/rgbenv/bin/python3
+```
+
+Sanity check:
+
+```bash
+~/rgbenv/bin/python3 -c "from rgbmatrix import RGBMatrix; print('ok')"
+```
+
+### 4. Install the dashboard's Python dependencies
+
+```bash
+~/rgbenv/bin/pip install paho-mqtt pyyaml Pillow ltr559
+```
+
+(`ltr559` is only needed if you use the Pimoroni ambient brightness sensor.)
+
+### 5. Enable I2C (only for the LTR-559 light sensor)
+
+Uncomment `dtparam=i2c_arm=on` in `/boot/firmware/config.txt` (or
+`/boot/config.txt` on older releases), then reboot. `sudo apt install
+i2c-tools` lets you check the bus with `i2cdetect -y 1` — the LTR-559 should
+appear at address `0x23`.
+
+### 6. An MQTT broker
+
+You need a broker publishing the topics listed below.
 
 ## MQTT topics expected
 
