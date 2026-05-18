@@ -10,10 +10,18 @@ values (PV production, grid import, grid export) from MQTT and renders:
   and daily energy totals (Conso / Export / Prod PV kWh)
 
 Built for the Raspberry Pi Zero 2W with the
-[Adafruit RGB Matrix HAT (PWM)](https://www.adafruit.com/product/2345)
-and 64x64 panels chained 2-wide (128x64 total). Uses
-[hzeller's rpi-rgb-led-matrix](https://github.com/hzeller/rpi-rgb-led-matrix)
-Python bindings.
+[Adafruit RGB Matrix HAT (PWM)](https://www.adafruit.com/product/2345).
+The panel I used was sold as a single 128x64 unit — internally it may well
+be two 64x64 tiles chained, but it was already wired and presented as one
+128x64 module. Yours may have a different physical layout, in which case the
+`display.hardware_mapping`, `cols`, `rows`, `chain_length` and `parallel`
+values will need to be adjusted.
+
+**Strongly recommended before running this project**: get the
+[hzeller rpi-rgb-led-matrix](https://github.com/hzeller/rpi-rgb-led-matrix)
+sample programs working first (e.g. `demo`, `runtext`, `image-viewer`). Once
+those render correctly on your hardware you will know the exact options to
+plug into the YAML config here.
 
 Optionally adapts the matrix brightness from ambient light using a
 **Pimoroni LTR-559** light sensor on the I2C bus.
