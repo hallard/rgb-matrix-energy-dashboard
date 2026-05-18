@@ -111,6 +111,67 @@ You need a broker publishing the topics listed below.
 
 All topic names are configurable; see `config_sample.yaml`.
 
+## Feeding the topics from Home Assistant
+
+If your inverter, PV optimizers, Linky teleinfo or smart meter are already
+integrated in Home Assistant, you typically don't need any new hardware
+plumbing — just publish the existing HA sensors to MQTT with a tiny
+automation per topic. The dashboard then consumes those topics as if they
+came from any other source.
+
+A few conventions help:
+
+- Use `retain: true` so the dashboard sees the last value as soon as it
+  connects (no waiting for the next state change).
+- Trigger on `state` of the sensors you want to publish — HA will fire the
+  automation each time the value updates.
+- Add an availability template guard when summing multiple sensors, so a
+  transient `unavailable` from one source doesn't poison the published value.
+- Make sure units match what the dashboard expects (see `linky_unit` and
+  `solar_unit` in `config_sample.yaml`). When you mix sources with different
+  units, normalize inside the template (e.g. divide Wh by 1000 to send kWh).
+
+### Example : sum several sources with unit normalization
+
+This adds APsystems ECU production (kWh) and EcoFlow PowerStream production
+(Wh, so divided by 1000), guards against `unavailable`/`unknown` states, and
+publishes the total in kWh:
+
+```yaml
+alias: Publish Solar Production Day
+description: Publish total production of ECU + PowerStream on MQTT
+triggers:
+  - trigger: state
+    entity_id:
+      - sensor.ecu_today_energy
+      - sensor.ps_production_day
+conditions:
+  - condition: template
+    value_template: >
+      {{ states('sensor.ecu_today_energy') not in ['unavailable',
+      'unknown', 'none', None]
+         and states('sensor.ps_production_day') not in ['unavailable', 'unknown', 'none', None] }}
+actions:
+  - action: mqtt.publish
+    metadata: {}
+    data:
+      evaluate_payload: false
+      retain: true
+      topic: energy/solar/production/day
+      payload: |
+        {{ (
+          states('sensor.ecu_today_energy') | float(0)
+          +
+          (states('sensor.ps_production_day') | float(0) / 1000)
+        ) | round(3) }}
+mode: single
+```
+
+The same pattern works for `energy/solar/ps/min` (instant PV power), the
+grid import/export topics, and so on. For the Linky JSON topic
+(`energy/linky/METER`), the Linky teleinfo integration usually already
+publishes it directly — no automation needed.
+
 ## Setup
 
 1. Clone the repo on your Pi:
