@@ -38,8 +38,6 @@ class State:
         self.day_use = None    # kWh consumed today (Linky TDAY)
         self.day_exp = None    # kWh exported today (Linky PTDAY)
         self.day_pv  = None    # kWh produced by PV today (MQTT topic)
-        self.lux = None        # ambient lux from LTR-559 (debug overlay)
-        self.brightness = None # computed matrix brightness 0..100 (debug)
 
     def update(self, key, value):
         with self.lock:
@@ -212,7 +210,7 @@ def mqtt_thread(cfg, state):
             time.sleep(5)
 
 
-def brightness_thread(matrix, state, cfg):
+def brightness_thread(matrix, cfg):
     """Adjust matrix.brightness from ambient light (LTR-559 over I2C)."""
     try:
         from ltr559 import LTR559
@@ -253,19 +251,16 @@ def brightness_thread(matrix, state, cfg):
             time.sleep(poll)
             continue
         ema = lux if ema is None else alpha * lux + (1 - alpha) * ema
-        state.update('lux', ema)
         if ema <= lmin:
             b = bmin
         elif ema >= lmax:
             b = bmax
         else:
             b = bmin + (bmax - bmin) * (ema - lmin) / span
-        b_int = int(round(b))
         try:
-            matrix.brightness = b_int
+            matrix.brightness = int(round(b))
         except Exception as e:
             logging.error("brightness set: %s", e)
-        state.update('brightness', b_int)
         time.sleep(poll)
 
 
@@ -377,7 +372,7 @@ def draw_pvu(d, ref_x, y_value, y_small, prefix, value, unit,
 
 
 def draw_dashboard(img, d, fonts, colors, layout, snap, day_snap, hist,
-                   bucket_minutes, lux=None, brightness=None):
+                   bucket_minutes):
     W, H = img.size
     d.rectangle([0, 0, W, H], fill=(0, 0, 0))
     f_big, f_small, f_axis = fonts
@@ -442,16 +437,6 @@ def draw_dashboard(img, d, fonts, colors, layout, snap, day_snap, hist,
                 d.line([(xp, chart_bot - ph), (xp, chart_bot - 1)], fill=cP)
             if uh > 0:
                 d.line([(xp, chart_bot - uh), (xp, chart_bot - 1)], fill=cU)
-
-        # Debug overlay: current lux + matrix brightness %, centered, white
-        if lux is not None:
-            parts = [f"{lux:.0f}lx"]
-            if brightness is not None:
-                parts.append(f"{brightness}%")
-            txt = " ".join(parts)
-            cx = (chart_x0 + W) // 2
-            cy = (chart_top + chart_bot) // 2 - 3   # f_axis ~5..6 px tall
-            draw_aligned(d, cx, cy, txt, f_axis, (255, 255, 255), 'center')
 
     # --- Bottom: ratios computed from DAILY totals (Linky kWh + PV) ---
     day_use, day_exp, day_pv = day_snap
@@ -554,7 +539,7 @@ def main():
                      daemon=True).start()
     br_cfg = cfg.get('brightness') or {}
     if br_cfg.get('enabled', False):
-        threading.Thread(target=brightness_thread, args=(matrix, state, br_cfg),
+        threading.Thread(target=brightness_thread, args=(matrix, br_cfg),
                          daemon=True).start()
 
     refresh = 1.0 / cfg['display'].get('refresh_hz', 4)
@@ -569,8 +554,7 @@ def main():
             next_load = t0 + 30
         draw_dashboard(img, d, (f_big, f_small, f_axis), cfg['colors'],
                        layout, state.snapshot(), state.snapshot_day(),
-                       hist, bucket_min, lux=state.lux,
-                       brightness=state.brightness)
+                       hist, bucket_min)
         canvas.SetImage(img)
         canvas = matrix.SwapOnVSync(canvas)
         dt = time.time() - t0
