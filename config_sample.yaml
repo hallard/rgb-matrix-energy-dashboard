@@ -1,0 +1,93 @@
+display:
+  hardware_mapping: adafruit-hat-pwm
+  rows: 64
+  cols: 128
+  gpio_slowdown: 4
+  pwm_bits: 11
+  brightness: 70
+  refresh_hz: 4
+  fonts:
+    # TOP: 8x13B bitmap bold (X11), 8 px wide x 13 tall, monospace
+    # Fallback candidates:
+    # big_path: /path/to/PressStart2P-Regular.ttf
+    # big_size: 8
+    # big_path: /path/to/Roboto-Bold.ttf
+    # big_size: 14
+    big_path: /path/to/pil-fonts/8x13B.pil
+    big_size: 0
+    # BOTTOM: tom-thumb.pil (3x5 bitmap, ultra compact).
+    # Used for bottom values + prefixes + units (all in 3x5).
+    # Fallback candidates:
+    # small_path: /path/to/pil-fonts/7x13B.pil
+    # small_path: /path/to/pil-fonts/6x13.pil
+    # small_path: /path/to/fonts/spleen-5x8.pil
+    small_path: /path/to/pil-fonts/tom-thumb.pil
+    small_size: 0
+    # 4x6 bitmap for the Y axis (pixel-perfect, ultra compact)
+    axis_path: /path/to/pil-fonts/4x6.pil
+    axis_size: 0   # ignored for .pil bitmaps
+  layout:
+    top_y: 0          # 8x13B: glyph y=0..12 (no top offset, bitmap)
+                      # (PressStart2P 8: 0 / Roboto-Bold 14: -2)
+    # Centers of the 3 top values: USE / EXP / PV (px out of 128)
+    top_centers: [22, 65, 107]
+    chart_x0: 12      # left offset for the Y axis labels (1k/2k/...)
+    chart_top: 14     # +1 px upward
+    chart_bot: 51     # +2 px downward (1 px gap before bottom labels at y=52)
+    bottom_y: 59      # tom-thumb 3x5 hugs the bottom edge (y=59..63)
+                      # Label above in grey -> y = bottom_y - 7 (5px + 2px gap)
+
+mqtt:
+  host: 192.168.1.10              # your MQTT broker host or IP
+  port: 1883
+  username: CHANGE_ME              # MQTT username
+  password: CHANGE_ME              # MQTT password
+  client_id_prefix: energy_dashboard
+  topics:
+    pv: energy/solar/ps/min                 # instant PV power (W)
+    import_grid: energy/grid/min            # instant grid import (W)
+    export_grid: energy/injection/min       # instant grid export (W)
+    linky_meter: energy/linky/METER         # JSON with daily counters
+    solar_meter: energy/solar/production/day  # daily PV total
+  linky_use_field: TDAY                    # kWh consumed today (from grid)
+  linky_exp_field: PTDAY                   # kWh exported today (injection)
+  linky_unit: Wh                           # 'Wh' (raw Linky) or 'kWh'
+  solar_field: ""                          # empty = payload is a raw number
+  solar_unit: kWh                          # topic already publishes in kWh
+
+history:
+  db_path: /home/pi/energy-dashboard/history.db
+  # Visible window: 116 columns x bucket_minutes (~9h40 with bucket=5).
+  bucket_minutes: 5
+  # In-RAM sample rate (zero SD impact).
+  # 1 min: aggregates 5 samples per bucket -> more faithful average.
+  sample_minutes: 1
+  # Dump period RAM -> SD (preserved across reboots).
+  # Increase to spare the SD card (at the cost of larger data loss
+  # in case of a power outage).
+  backup_minutes: 60
+
+# Colours (RGB 0-255) - OpenEnergyMonitor palette
+colors:
+  pv:    [255, 220,   0]   # yellow
+  use:   [  0, 180, 255]   # cyan blue
+  exp:   [ 50, 220,  80]   # green
+  imp:   [255,  60,  60]   # red
+  label: [130, 130, 130]
+  dim:   [ 50,  50,  50]
+  frame: [ 90,  90,  90]   # frame around the chart
+
+# Automatic brightness adjustment via LTR-559 (I2C 0x23).
+# Disable this section (or set enabled: false) if you don't have the sensor.
+brightness:
+  enabled: true
+  min: 15            # min brightness (night/dark)
+  max: 80            # max brightness (sunny day)
+  # Sensor sits behind the matrix -> readings are heavily attenuated.
+  # Tune lux_min/lux_max to the actual readings observed in your room.
+  lux_min: 0.5       # lux <= this threshold -> brightness = min
+  lux_max: 30        # lux >= this threshold -> brightness = max
+  poll_seconds: 1    # sensor polling period
+  ema_alpha: 0.4     # exponential smoothing: 1=instant, 0.1=very smooth
+  sensor_gain: 4            # LTR-559 gain: 1, 2, 4, 8, 48, 96 (default 4)
+  sensor_integration_ms: 100  # 50, 100, 150, 200, 250, 300, 350, 400 ms

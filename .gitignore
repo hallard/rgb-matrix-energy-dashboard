@@ -1,0 +1,31 @@
+# Local user configuration (contains MQTT credentials)
+config.yaml
+
+# Runtime data
+history.db
+history.db-journal
+history.db-wal
+history.db-shm
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local fonts directory (download or symlink your own; not part of the repo)
+fonts/
+
+# Test/exploration programs (kept local, not part of the public repo)
+test_fonts.py
+test_top_fonts.py

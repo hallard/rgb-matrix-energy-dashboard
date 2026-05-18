@@ -1,0 +1,24 @@
+[Unit]
+Description=Energy Dashboard (128x64 RGB LED Matrix)
+Documentation=file:///home/pi/energy-dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/pi/energy-dashboard
+ExecStart=/home/pi/rgbenv/bin/python3 /home/pi/energy-dashboard/energy_dashboard.py
+# Auto-restart on crash, leave alone on clean exit
+Restart=on-failure
+RestartSec=10
+# SIGTERM triggers the in-script DB flush handler
+KillSignal=SIGTERM
+TimeoutStopSec=15
+# Send logs to journald (view with journalctl -u energy-dashboard -f)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=energy-dashboard
+
+[Install]
+WantedBy=multi-user.target
