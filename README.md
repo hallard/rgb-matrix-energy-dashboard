@@ -295,6 +295,15 @@ resilience on a power cut.
 
 (Bottom row alternates every 5s with the daily kWh page.)
 
+## Acknowledgments
+
+The whole idea — the layout, the colour palette and the daily share ratios —
+is directly inspired by [emoncms](https://emoncms.org/) and its
+**MySolarPVBattery** app, part of the
+[OpenEnergyMonitor](https://openenergymonitor.org/) project. Huge thanks to
+[@TrystanLea](https://github.com/TrystanLea) for his superb work on emoncms and
+the OpenEnergyMonitor ecosystem over the years.
+
 ## License
 
 This dashboard is released under the MIT license — see [`LICENSE`](LICENSE).
