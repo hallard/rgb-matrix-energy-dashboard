@@ -297,4 +297,11 @@ resilience on a power cut.
 
 ## License
 
-MIT. See `LICENSE` if present.
+This dashboard is released under the MIT license — see [`LICENSE`](LICENSE).
+
+Note: it drives the panels through
+[hzeller/rpi-rgb-led-matrix](https://github.com/hzeller/rpi-rgb-led-matrix),
+which is **GPL-2.0-or-later**. The source files here are MIT (and MIT is
+GPL-compatible), but the *combined running program* you build with that
+library is a derivative work governed by the GPL. The library is installed
+separately and is not redistributed by this repository.
