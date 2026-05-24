@@ -30,26 +30,37 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 # --- Shared MQTT state ----------------------------------------------------
 class State:
+    """Fed from the single JSON topic `energy/home`."""
     def __init__(self):
         self.lock = threading.Lock()
-        self.pv = None
-        self.imp = None
-        self.exp = None
-        self.day_use = None    # kWh consumed today (Linky TDAY)
-        self.day_exp = None    # kWh exported today (Linky PTDAY)
-        self.day_pv  = None    # kWh produced by PV today (MQTT topic)
+        # instantaneous (W)
+        self.prod_watt = None   # PV production -> yellow
+        self.use_nobat = None   # house load excl. battery -> blue
+        self.grid_watt = None   # grid power, signed: >=0 import, <0 export
+        # cumulative meters (kWh) -- used for the daily bottom row
+        self.prod_kwh = None
+        self.use_kwh_nobat = None
+        self.grid_import_kwh = None
+        self.grid_export_kwh = None
+        self.solar_direct_kwh = None
 
-    def update(self, key, value):
+    def update_many(self, d):
+        """Set only the keys whose value is not None (full JSON each msg)."""
         with self.lock:
-            setattr(self, key, value)
+            for k, v in d.items():
+                if v is not None:
+                    setattr(self, k, v)
 
     def snapshot(self):
+        """(prod_watt, use_nobat, grid_watt) -> stored as (pv, imp, exp)."""
         with self.lock:
-            return self.pv, self.imp, self.exp
+            return self.prod_watt, self.use_nobat, self.grid_watt
 
-    def snapshot_day(self):
+    def snapshot_kwh(self):
+        """Cumulative meters: (prod, use_nobat, grid_import, grid_export, solar_direct)."""
         with self.lock:
-            return self.day_use, self.day_exp, self.day_pv
+            return (self.prod_kwh, self.use_kwh_nobat, self.grid_import_kwh,
+                    self.grid_export_kwh, self.solar_direct_kwh)
 
 
 # --- SQLite history -------------------------------------------------------
@@ -59,7 +70,14 @@ DB_SCHEMA = """
         pv  INTEGER,
         imp INTEGER,
         exp INTEGER
-    )
+    );
+    CREATE TABLE IF NOT EXISTS day_base (
+        id   INTEGER PRIMARY KEY CHECK (id = 1),
+        day  TEXT,
+        prod REAL,
+        use  REAL,
+        exp  REAL
+    );
 """
 
 
@@ -81,7 +99,7 @@ def init_db(disk_path):
         except sqlite3.Error as e:
             logging.warning("Restore failed (%s) - starting fresh", e)
 
-    ram.execute(DB_SCHEMA)
+    ram.executescript(DB_SCHEMA)
     return ram
 
 
@@ -124,72 +142,74 @@ def prune_history(db, window_seconds):
     db.execute("DELETE FROM history WHERE ts < ?", (cutoff,))
 
 
+def update_day_baseline(db, prod, use, exp):
+    """Capture/refresh the midnight reference for the lifetime kWh counters.
+    Re-baselines on a new local day, on first run, or if a counter went
+    backwards (meter reset). No-op until all three values are available."""
+    if prod is None or use is None or exp is None:
+        return
+    today = time.strftime("%Y-%m-%d")
+    row = db.execute("SELECT day, prod, use, exp FROM day_base WHERE id=1").fetchone()
+    if row is None:
+        db.execute("INSERT INTO day_base (id, day, prod, use, exp) VALUES (1,?,?,?,?)",
+                   (today, prod, use, exp))
+        return
+    bday, bprod, buse, bexp = row
+    if bday != today or prod < bprod or use < buse or exp < bexp:
+        db.execute("UPDATE day_base SET day=?, prod=?, use=?, exp=? WHERE id=1",
+                   (today, prod, use, exp))
+
+
+def day_totals(db, snap_kwh):
+    """Today's totals = current cumulative - midnight baseline.
+    Returns (day_prod, day_use, day_export) in kWh, None until ready."""
+    prod, use_nb, _gimp, gexp, _sdir = snap_kwh
+    row = db.execute("SELECT prod, use, exp FROM day_base WHERE id=1").fetchone()
+    if row is None:
+        return None, None, None
+    bprod, buse, bexp = row
+
+    def delta(cur, base):
+        if cur is None or base is None:
+            return None
+        return max(0.0, cur - base)
+
+    return delta(prod, bprod), delta(use_nb, buse), delta(gexp, bexp)
+
+
 # --- Threads --------------------------------------------------------------
 def mqtt_thread(cfg, state):
-    topics = cfg['mqtt']['topics']
-    t2k = {
-        topics['pv']: 'pv',
-        topics['import_grid']: 'imp',
-        topics['export_grid']: 'exp',
-    }
-    linky_topic = topics.get('linky_meter') or None
-    use_field   = cfg['mqtt'].get('linky_use_field', 'TDAY')
-    exp_field   = cfg['mqtt'].get('linky_exp_field', 'PTDAY')
-    linky_scale = 0.001 if cfg['mqtt'].get('linky_unit', 'Wh') == 'Wh' else 1.0
-
-    solar_topic = topics.get('solar_meter') or None
-    solar_field = cfg['mqtt'].get('solar_field', '') or None
-    solar_scale = 0.001 if cfg['mqtt'].get('solar_unit', 'Wh') == 'Wh' else 1.0
+    home_topic = cfg['mqtt']['topics']['home']
 
     def on_connect(client, userdata, flags, rc):
         logging.info("MQTT connected rc=%s", rc)
-        for t in t2k:
-            client.subscribe(t)
-        if linky_topic:
-            client.subscribe(linky_topic)
-        if solar_topic:
-            client.subscribe(solar_topic)
+        client.subscribe(home_topic)
 
     def on_message(client, userdata, msg):
-        topic = msg.topic
-        # Linky: multi-field JSON (daily conso + export)
-        if topic == linky_topic:
-            try:
-                j = json.loads(msg.payload.decode())
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                return
-            if use_field in j:
-                try:
-                    state.update('day_use', float(j[use_field]) * linky_scale)
-                except (ValueError, TypeError):
-                    pass
-            if exp_field in j:
-                try:
-                    state.update('day_exp', float(j[exp_field]) * linky_scale)
-                except (ValueError, TypeError):
-                    pass
+        if msg.topic != home_topic:
             return
-        # Daily PV: JSON single field or raw number
-        if topic == solar_topic:
-            payload = msg.payload.decode(errors='ignore').strip()
-            try:
-                if solar_field:
-                    j = json.loads(payload)
-                    val = float(j[solar_field])
-                else:
-                    val = float(payload)
-                state.update('day_pv', val * solar_scale)
-            except (json.JSONDecodeError, ValueError, KeyError, TypeError):
-                pass
-            return
-        # Simple topics: raw number in W
         try:
-            v = float(msg.payload.decode().strip())
-        except (ValueError, UnicodeDecodeError):
+            j = json.loads(msg.payload.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return
-        key = t2k.get(topic)
-        if key:
-            state.update(key, v)
+
+        def num(key):
+            v = j.get(key)
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        state.update_many({
+            'prod_watt':        num('prod_watt'),
+            'use_nobat':        num('use_watt_no_bat'),
+            'grid_watt':        num('grid_watt'),
+            'prod_kwh':         num('prod_kwh'),
+            'use_kwh_nobat':    num('use_kwh_no_bat'),
+            'grid_import_kwh':  num('grid_import_kwh'),
+            'grid_export_kwh':  num('grid_export_kwh'),
+            'solar_direct_kwh': num('solar_direct_kwh'),
+        })
 
     client_id = f"{cfg['mqtt']['client_id_prefix']}_{int(time.time())}"
     try:
@@ -270,6 +290,12 @@ def logger_thread(ram_db, state, disk_path, sample_sec, backup_sec, window_secon
     next_backup = time.time() + backup_sec
     while True:
         time.sleep(sample_sec)
+        # Refresh the midnight reference for the daily kWh totals.
+        kprod, kuse, _gimp, kexp, _sdir = state.snapshot_kwh()
+        try:
+            update_day_baseline(ram_db, kprod, kuse, kexp)
+        except sqlite3.Error as e:
+            logging.error("DB baseline: %s", e)
         pv, imp, exp = state.snapshot()
         if pv is None and imp is None and exp is None:
             continue
@@ -371,39 +397,68 @@ def draw_pvu(d, ref_x, y_value, y_small, prefix, value, unit,
         d.text((x + w_p + w_v, y_small), unit,  font=font_small, fill=fill_small)
 
 
+def draw_arrow(d, x, y0, up, color, w=6, h=8, head=3, shaft_w=2):
+    """Arrow whose top pixel is `y0`: a triangular head (`head` px tall, `w` px
+    base tapering to a `shaft_w` apex) plus a `shaft_w`-wide shaft on the rest.
+    Apex and shaft share the same centred columns so the head stays centred on
+    the shaft. up=export, down=import."""
+    sx0 = x + (w - shaft_w) // 2     # shaft / apex left column (centred on base)
+    sx1 = sx0 + shaft_w - 1
+    shaft = h - head
+    if up:
+        # head points up at the top, shaft below
+        d.polygon([(sx0, y0), (sx1, y0),
+                   (x + w - 1, y0 + head - 1), (x, y0 + head - 1)], fill=color)
+        d.rectangle([sx0, y0 + head, sx1, y0 + h - 1], fill=color)
+    else:
+        # shaft on top, head points down at the bottom
+        d.rectangle([sx0, y0, sx1, y0 + shaft - 1], fill=color)
+        d.polygon([(x, y0 + shaft), (x + w - 1, y0 + shaft),
+                   (sx1, y0 + h - 1), (sx0, y0 + h - 1)], fill=color)
+    return w
+
+
 def draw_dashboard(img, d, fonts, colors, layout, snap, day_snap, hist,
                    bucket_minutes):
     W, H = img.size
     d.rectangle([0, 0, W, H], fill=(0, 0, 0))
     f_big, f_small, f_axis = fonts
 
-    pv, imp, exp = snap
-    # Compute conso as soon as at least one topic has a value: others count
-    # as 0 (useful at night when PV stops publishing, etc.)
-    if pv is None and imp is None and exp is None:
-        conso = None
-    else:
-        conso = max(0, (pv or 0) + (imp or 0) - (exp or 0))
+    # snap = (prod_watt, use_nobat, grid_watt), stored in the DB as (pv, imp, exp)
+    prod, use_nobat, grid = snap
 
-    # --- Top: USE left, EXP center, PV right ---
+    # --- Top: USE left, GRID center, PV right ---
     # Left-anchored items shifted by 1 px so they don't hug the panel edge.
     top_y = layout['top_y']
-    draw_aligned(d,   1, top_y, fmt_w(conso) + "W", f_big, tuple(colors['use']), 'left')
-    draw_aligned(d,  64, top_y, fmt_w(exp)   + "W", f_big, tuple(colors['exp']), 'center')
-    draw_aligned(d, 128, top_y, fmt_w(pv)    + "W", f_big, tuple(colors['pv']),  'right')
+    # Left: house load excl. battery (cyan)
+    draw_aligned(d,   1, top_y, fmt_w(use_nobat) + "W", f_big, tuple(colors['use']), 'left')
+    # Center: grid power with a direction arrow -- colour + arrow show flow
+    # (>=0 import: red, arrow down ; <0 export: green, arrow up)
+    g = grid or 0
+    grid_col = tuple(colors['imp']) if g >= 0 else tuple(colors['exp'])
+    gtxt = fmt_w(abs(g)) + "W"
+    aw, gap, ah = 6, 2, 8
+    bb = d.textbbox((0, 0), gtxt, font=f_big)
+    tw = bb[2] - bb[0]
+    ax = 64 - (aw + gap + tw) // 2
+    # centre the arrow on the number's actual vertical ink extent
+    ay0 = top_y + round((bb[1] + bb[3]) / 2 - ah / 2)
+    draw_arrow(d, ax, ay0, up=g < 0, color=grid_col, w=aw, h=ah)
+    d.text((ax + aw + gap, top_y), gtxt, font=f_big, fill=grid_col)
+    # Right: PV production (yellow)
+    draw_aligned(d, 128, top_y, fmt_w(prod) + "W", f_big, tuple(colors['pv']),  'right')
 
     chart_top = layout['chart_top']
     chart_bot = layout['chart_bot']
     chart_x0  = layout['chart_x0']
     h = chart_bot - chart_top
     gw = W - chart_x0
-    pv_h, imp_h, exp_h = hist
+    pv_h, imp_h, exp_h = hist   # (prod_watt, use_nobat, grid_watt) history
     cdim = tuple(colors['dim'])
     cL   = tuple(colors['label'])
 
     if len(pv_h) == gw and gw > 0:
-        # Blue = grid import only (what we actually pull from the grid).
-        # Sunny day with no import -> no blue.
+        # Blue = house load excl. battery (use_nobat), stacked over yellow PV.
         use_h = [max(0.0, imp_h[x]) for x in range(gw)]
         # 1k floor: under 1kW the scale stays at 1k, above it auto-adapts
         peak = max(max(pv_h), max(use_h), 1000.0)
@@ -438,24 +493,24 @@ def draw_dashboard(img, d, fonts, colors, layout, snap, day_snap, hist,
             if uh > 0:
                 d.line([(xp, chart_bot - uh), (xp, chart_bot - 1)], fill=cU)
 
-    # --- Bottom: ratios computed from DAILY totals (Linky kWh + PV) ---
-    day_use, day_exp, day_pv = day_snap
-    # Daily total house consumption = grid + (PV produced - PV exported)
-    day_conso = None
-    if day_use is not None and day_pv is not None and day_exp is not None:
-        day_conso = day_use + max(0.0, day_pv - day_exp)
+    # --- Bottom: daily totals (delta since midnight on cumulative kWh) ---
+    # day_snap = (PV produced, house consumption, grid exported) in kWh.
+    day_pv, day_use, day_exp = day_snap
+    self_pv = None  # PV not exported (self-consumed / stored)
+    if day_pv is not None and day_exp is not None:
+        self_pv = max(0.0, day_pv - day_exp)
     # GRID % = share of daily consumption pulled from the grid (blue)
     grid_p = None
-    if day_conso and day_conso > 0 and day_use is not None:
-        grid_p = max(0.0, min(100.0, day_use / day_conso * 100))
+    if day_use and day_use > 0 and self_pv is not None:
+        grid_p = max(0.0, min(100.0, (day_use - self_pv) / day_use * 100))
     # EXPORT % = share of PV exported to the grid (green)
     export_p = None
     if day_pv and day_pv > 0 and day_exp is not None:
         export_p = max(0.0, min(100.0, day_exp / day_pv * 100))
     # DIRECT % = share of PV self-consumed (yellow)
     direct_p = None
-    if day_pv and day_pv > 0 and day_exp is not None:
-        direct_p = max(0.0, min(100.0, (day_pv - day_exp) / day_pv * 100))
+    if day_pv and day_pv > 0 and self_pv is not None:
+        direct_p = max(0.0, min(100.0, self_pv / day_pv * 100))
 
     # Bottom: 5s cycle between [% ratios] and [daily kWh USE/EXP/PV].
     # Everything in f_small (tom-thumb 3x5) -> value + suffix on the same
@@ -552,8 +607,9 @@ def main():
         if t0 >= next_load:
             hist = load_history(db, bucket_min, graph_cols)
             next_load = t0 + 30
+        day_snap = day_totals(db, state.snapshot_kwh())
         draw_dashboard(img, d, (f_big, f_small, f_axis), cfg['colors'],
-                       layout, state.snapshot(), state.snapshot_day(),
+                       layout, state.snapshot(), day_snap,
                        hist, bucket_min)
         canvas.SetImage(img)
         canvas = matrix.SwapOnVSync(canvas)

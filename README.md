@@ -1,13 +1,18 @@
 # RGB Matrix Energy Dashboard
 
 A 128x64 RGB LED matrix dashboard for home energy monitoring, inspired by
-[OpenEnergyMonitor](https://openenergymonitor.org/). It reads live power
-values (PV production, grid import, grid export) from MQTT and renders:
+[OpenEnergyMonitor](https://openenergymonitor.org/). It reads a single JSON
+MQTT topic (`energy/home`, see [MQTT payload](#mqtt-payload-expected)) and
+renders:
 
-- **Top row**: instant **USE / EXP / PV** in watts
-- **Middle**: stacked 24h-ish history chart (yellow = PV, blue = grid import)
-- **Bottom**: cycling page between daily share ratios (Grid / Export / Direct %)
-  and daily energy totals (Conso / Export / Prod PV kWh)
+- **Top row**: instant **house use / grid / PV** in watts. The grid value in
+  the centre carries a direction arrow: **down + red = import**,
+  **up + green = export**.
+- **Middle**: stacked history chart (yellow = PV production,
+  blue = house load excluding battery)
+- **Bottom**: cycling page between daily share ratios (Reseau / Export /
+  Direct %) and daily energy totals (Conso / Export / Prod PV kWh), computed
+  as the delta of the cumulative kWh counters since midnight
 
 Built for the Raspberry Pi Zero 2W with the
 [Adafruit RGB Matrix HAT (PWM)](https://www.adafruit.com/product/2345).
@@ -98,79 +103,98 @@ appear at address `0x23`.
 
 ### 6. An MQTT broker
 
-You need a broker publishing the topics listed below.
+You need a broker publishing the single JSON topic described below.
 
-## MQTT topics expected
+## MQTT payload expected
 
-- `pv`           : instant PV production in W (raw number)
-- `import_grid`  : instant grid import in W
-- `export_grid`  : instant grid export in W (injection)
-- `linky_meter`  : JSON payload with daily counters
-  (`TDAY` = kWh consumed from grid, `PTDAY` = kWh exported)
-- `solar_meter`  : daily PV production total (raw number or JSON field)
+The dashboard subscribes to **one** topic (`energy/home` by default, set via
+`mqtt.topics.home`). Each message is a JSON object with these fields:
 
-All topic names are configurable; see `config_sample.yaml`.
+```json
+{
+  "prod_watt": 19,
+  "use_watt_no_bat": 347.2,
+  "grid_watt": -5,
+  "prod_kwh": 71.97,
+  "use_kwh_no_bat": 18.83,
+  "grid_export_kwh": 4235.818
+}
+```
 
-## Feeding the topics from Home Assistant
+| Field             | Unit | Meaning                                   | Where it shows |
+|-------------------|------|-------------------------------------------|----------------|
+| `prod_watt`       | W    | Instant PV production                      | Top right (yellow) + chart (yellow) |
+| `use_watt_no_bat` | W    | Instant house load **excluding battery**  | Top left (cyan) + chart (blue) |
+| `grid_watt`       | W    | Instant grid power, **signed**: `>= 0` = import, `< 0` = export | Top centre (arrow + colour: down/red import, up/green export) |
+| `prod_kwh`        | kWh  | Cumulative PV production counter           | Bottom **Prod PV** (delta since midnight) |
+| `use_kwh_no_bat`  | kWh  | Cumulative house consumption counter (excl. battery) | Bottom **Conso** (delta since midnight) |
+| `grid_export_kwh` | kWh  | Cumulative grid export counter            | Bottom **Export** (delta since midnight) |
+
+> The `*_kwh` fields are **lifetime/incremental counters that are never reset
+> at midnight**. The dashboard stores the value seen at the start of each day
+> (persisted in the DB) and shows `current - midnight baseline` as "today".
+> The bottom ratios (Reseau / Export / Direct %) are derived from those three
+> daily deltas.
+
+The topic name is configurable; see `config_sample.yaml`.
+
+## Feeding the topic from Home Assistant
 
 If your inverter, PV optimizers, Linky teleinfo or smart meter are already
 integrated in Home Assistant, you typically don't need any new hardware
-plumbing — just publish the existing HA sensors to MQTT with a tiny
-automation per topic. The dashboard then consumes those topics as if they
-came from any other source.
+plumbing — just assemble the existing HA sensors into the single `energy/home`
+JSON payload and publish it with one automation.
 
 A few conventions help:
 
 - Use `retain: true` so the dashboard sees the last value as soon as it
   connects (no waiting for the next state change).
-- Trigger on `state` of the sensors you want to publish — HA will fire the
-  automation each time the value updates.
-- Add an availability template guard when summing multiple sensors, so a
-  transient `unavailable` from one source doesn't poison the published value.
-- Make sure units match what the dashboard expects (see `linky_unit` and
-  `solar_unit` in `config_sample.yaml`). When you mix sources with different
-  units, normalize inside the template (e.g. divide Wh by 1000 to send kWh).
+- Trigger on `state` of every sensor that feeds the payload — HA will fire the
+  automation each time any value updates.
+- Guard each value with `float(0)` (or an availability template) so a
+  transient `unavailable`/`unknown` doesn't poison the published JSON.
+- Make sure units match the table above (watts for `*_watt`, kWh for `*_kwh`).
+  Normalize inside the template when sources differ (e.g. divide Wh by 1000 to
+  send kWh). `grid_watt` must be **signed**: positive when importing, negative
+  when exporting.
 
-### Example : sum several sources with unit normalization
+### Example: publish the combined JSON
 
-This adds APsystems ECU production (kWh) and EcoFlow PowerStream production
-(Wh, so divided by 1000), guards against `unavailable`/`unknown` states, and
-publishes the total in kWh:
+This builds the `energy/home` payload from a few sensors (adapt the entity ids
+to yours), divides an EcoFlow PowerStream counter from Wh to kWh, and publishes
+the whole object:
 
 ```yaml
-alias: Publish Solar Production Day
-description: Publish total production of ECU + PowerStream on MQTT
+alias: Publish energy/home
+description: Assemble the dashboard JSON payload and publish it on MQTT
 triggers:
   - trigger: state
     entity_id:
-      - sensor.ecu_today_energy
-      - sensor.ps_production_day
-conditions:
-  - condition: template
-    value_template: >
-      {{ states('sensor.ecu_today_energy') not in ['unavailable',
-      'unknown', 'none', None]
-         and states('sensor.ps_production_day') not in ['unavailable', 'unknown', 'none', None] }}
+      - sensor.pv_power
+      - sensor.house_power_no_battery
+      - sensor.grid_power            # signed: + import / - export
+      - sensor.pv_energy_total
+      - sensor.house_energy_no_battery_total
+      - sensor.grid_export_total
 actions:
   - action: mqtt.publish
-    metadata: {}
     data:
       evaluate_payload: false
       retain: true
-      topic: energy/solar/production/day
-      payload: |
-        {{ (
-          states('sensor.ecu_today_energy') | float(0)
-          +
-          (states('sensor.ps_production_day') | float(0) / 1000)
-        ) | round(3) }}
+      topic: energy/home
+      payload: >
+        {
+          "prod_watt": {{ states('sensor.pv_power') | float(0) | round(0) }},
+          "use_watt_no_bat": {{ states('sensor.house_power_no_battery') | float(0) | round(0) }},
+          "grid_watt": {{ states('sensor.grid_power') | float(0) | round(0) }},
+          "prod_kwh": {{ states('sensor.pv_energy_total') | float(0) | round(3) }},
+          "use_kwh_no_bat": {{ states('sensor.house_energy_no_battery_total') | float(0) | round(3) }},
+          "grid_export_kwh": {{ states('sensor.grid_export_total') | float(0) | round(3) }}
+        }
 mode: single
 ```
 
-The same pattern works for `energy/solar/ps/min` (instant PV power), the
-grid import/export topics, and so on. For the Linky JSON topic
-(`energy/linky/METER`), the Linky teleinfo integration usually already
-publishes it directly — no automation needed.
+Only these six fields are needed.
 
 ## Setup
 
@@ -242,8 +266,9 @@ brightness ramps between `min` and `max` as the measured lux moves between
 `lux_min` and `lux_max`, with exponential smoothing (`ema_alpha`).
 
 Because the sensor sits behind the panel, readings are heavily attenuated.
-Run the dashboard for a day, watch the debug overlay (lux + brightness %
-in the chart area), and tune `lux_min` / `lux_max` accordingly.
+Run the dashboard for a day, watch the `LTR-559 read` / brightness values in
+the logs (`journalctl -u energy-dashboard -f`), and tune `lux_min` / `lux_max`
+accordingly.
 
 ## SD card wear
 
@@ -256,7 +281,7 @@ resilience on a power cut.
 
 ```
 +--------------------------------------------------------------+
-|  USEw          EXPw                              PVw         |
+|  USEw         v GRIDw                            PVw         |
 |--------------------------------------------------------------|
 |  3k ··· ······································ ·········    |
 |  2k ·····████······························ ··  ········    |

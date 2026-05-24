@@ -44,16 +44,14 @@ mqtt:
   password: CHANGE_ME              # MQTT password
   client_id_prefix: energy_dashboard
   topics:
-    pv: energy/solar/ps/min                 # instant PV power (W)
-    import_grid: energy/grid/min            # instant grid import (W)
-    export_grid: energy/injection/min       # instant grid export (W)
-    linky_meter: energy/linky/METER         # JSON with daily counters
-    solar_meter: energy/solar/production/day  # daily PV total
-  linky_use_field: TDAY                    # kWh consumed today (from grid)
-  linky_exp_field: PTDAY                   # kWh exported today (injection)
-  linky_unit: Wh                           # 'Wh' (raw Linky) or 'kWh'
-  solar_field: ""                          # empty = payload is a raw number
-  solar_unit: kWh                          # topic already publishes in kWh
+    # Single JSON topic. Fields used by the dashboard:
+    #   prod_watt        (W)   instant PV production            -> top right / chart yellow
+    #   use_watt_no_bat  (W)   instant house load excl. battery -> top left  / chart blue
+    #   grid_watt        (W)   signed grid power, >=0 import / <0 export -> top centre
+    #   prod_kwh         (kWh) cumulative PV counter            -> bottom Prod PV (daily delta)
+    #   use_kwh_no_bat   (kWh) cumulative house counter         -> bottom Conso   (daily delta)
+    #   grid_export_kwh  (kWh) cumulative export counter        -> bottom Export  (daily delta)
+    home: energy/home
 
 history:
   db_path: /home/pi/energy-dashboard/history.db
