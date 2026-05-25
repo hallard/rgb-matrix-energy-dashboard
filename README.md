@@ -230,6 +230,8 @@ Only these six fields are needed.
 
 ## Running
 
+![RGB Matrix Energy Dashboard running](images/rgb-matrix-energy-dashboard-running.gif)
+
 Manually:
 
 ```bash
