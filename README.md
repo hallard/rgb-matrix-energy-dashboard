@@ -1,6 +1,6 @@
 # RGB Matrix Energy Dashboard
 
-![RGB Matrix Energy Dashboard running on a 128x64 LED panel](images/rgb-matrix-energy-dashboard.jpg)
+![RGB Matrix Energy Dashboard running on a 128x64 LED panel](images/rgb-matrix-energy-dashboard.gif)
 
 A 128x64 RGB LED matrix dashboard for home energy monitoring, inspired by
 [OpenEnergyMonitor](https://openenergymonitor.org/). It reads a single JSON
