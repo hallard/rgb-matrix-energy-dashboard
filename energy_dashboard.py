@@ -43,6 +43,13 @@ class State:
         self.grid_import_kwh = None
         self.grid_export_kwh = None
         self.solar_direct_kwh = None
+        # battery aggregate (energy/ecoflow/batteries/aggregate)
+        self.batt = None                  # SOC %
+        self.batt_input_watt = None       # charging power (W)
+        self.batt_output_watt = None      # discharging power (W)
+        self.batt_power_watt = None       # net (W), informational
+        self.batt_input_kwh = None        # cumulative charged (kWh, lifetime)
+        self.batt_output_kwh = None       # cumulative discharged (kWh)
 
     def update_many(self, d):
         """Set only the keys whose value is not None (full JSON each msg)."""
@@ -61,6 +68,11 @@ class State:
         with self.lock:
             return (self.prod_kwh, self.use_kwh_nobat, self.grid_import_kwh,
                     self.grid_export_kwh, self.solar_direct_kwh)
+
+    def snapshot_battery(self):
+        """(SOC %, signed power W (>0 discharge, <0 charge), input kWh cumulative)."""
+        with self.lock:
+            return self.batt, self.batt_power_watt, self.batt_input_kwh
 
 
 # --- SQLite history -------------------------------------------------------
@@ -180,14 +192,15 @@ def day_totals(db, snap_kwh):
 # --- Threads --------------------------------------------------------------
 def mqtt_thread(cfg, state):
     home_topic = cfg['mqtt']['topics']['home']
+    batt_topic = cfg['mqtt']['topics'].get('battery')
 
     def on_connect(client, userdata, flags, rc):
         logging.info("MQTT connected rc=%s", rc)
         client.subscribe(home_topic)
+        if batt_topic:
+            client.subscribe(batt_topic)
 
     def on_message(client, userdata, msg):
-        if msg.topic != home_topic:
-            return
         try:
             j = json.loads(msg.payload.decode())
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -200,16 +213,26 @@ def mqtt_thread(cfg, state):
             except (TypeError, ValueError):
                 return None
 
-        state.update_many({
-            'prod_watt':        num('prod_watt'),
-            'use_nobat':        num('use_watt_no_bat'),
-            'grid_watt':        num('grid_watt'),
-            'prod_kwh':         num('prod_kwh'),
-            'use_kwh_nobat':    num('use_kwh_no_bat'),
-            'grid_import_kwh':  num('grid_import_kwh'),
-            'grid_export_kwh':  num('grid_export_kwh'),
-            'solar_direct_kwh': num('solar_direct_kwh'),
-        })
+        if msg.topic == home_topic:
+            state.update_many({
+                'prod_watt':        num('prod_watt'),
+                'use_nobat':        num('use_watt_no_bat'),
+                'grid_watt':        num('grid_watt'),
+                'prod_kwh':         num('prod_kwh'),
+                'use_kwh_nobat':    num('use_kwh_no_bat'),
+                'grid_import_kwh':  num('grid_import_kwh'),
+                'grid_export_kwh':  num('grid_export_kwh'),
+                'solar_direct_kwh': num('solar_direct_kwh'),
+            })
+        elif msg.topic == batt_topic:
+            state.update_many({
+                'batt':             num('batt'),
+                'batt_input_watt':  num('input_watt'),
+                'batt_output_watt': num('output_watt'),
+                'batt_power_watt':  num('power_watt'),
+                'batt_input_kwh':   num('input_kwh'),
+                'batt_output_kwh':  num('output_kwh'),
+            })
 
     client_id = f"{cfg['mqtt']['client_id_prefix']}_{int(time.time())}"
     try:
@@ -329,11 +352,10 @@ def setup_matrix(cfg):
 
 
 def fmt_w(v):
+    """Top values stay in watts (no kW conversion); the 'W' unit is drawn in a
+    smaller font so the full number keeps its size and still fits."""
     if v is None:
         return "0"
-    av = abs(v)
-    if av >= 10000:
-        return f"{v/1000:.1f}k"
     return str(int(round(v)))
 
 
@@ -418,8 +440,49 @@ def draw_arrow(d, x, y0, up, color, w=6, h=8, head=3, shaft_w=2):
     return w
 
 
-def draw_dashboard(img, d, fonts, colors, layout, snap, day_snap, hist,
-                   bucket_minutes):
+def draw_battery_icon(d, x, top, level, frame_col, fill_col,
+                      w=7, h=10, term_w=3, term_h=2):
+    """Vertical battery icon: terminal nub on top, body below, filled from the
+    bottom proportional to `level` (0..100). `top` is the topmost pixel
+    (the nub). Total height = h + term_h. Returns horizontal extent (w)."""
+    # terminal nub centred on top
+    nx = x + (w - term_w) // 2
+    d.rectangle([nx, top, nx + term_w - 1, top + term_h - 1], fill=frame_col)
+    # body outline below the nub
+    body_top = top + term_h
+    body_bot = body_top + h - 1
+    d.rectangle([x, body_top, x + w - 1, body_bot], outline=frame_col)
+    # fill bar from the bottom of the inner area
+    if level is not None and level > 0:
+        inner_h = h - 2
+        fill_h = max(1, min(inner_h, round(inner_h * level / 100)))
+        d.rectangle([x + 1, body_bot - fill_h, x + w - 2, body_bot - 1], fill=fill_col)
+    return w
+
+
+# Top values: a big number followed by a smaller 'W' unit. The 8x13B digits'
+# ink bottom sits at top_y+10; the small 'W' glyph is 5px tall, so drawing it at
+# top_y+UNIT_DY lands its bottom on that same baseline.
+UNIT_DY = 6
+UNIT_GAP = 1   # px between the number and the small unit
+
+
+def w_value_width(d, num, font_big, font_unit, unit="W"):
+    return (d.textbbox((0, 0), num, font=font_big)[2] + UNIT_GAP
+            + d.textbbox((0, 0), unit, font=font_unit)[2])
+
+
+def draw_w_value(d, x, top_y, num, font_big, font_unit, fill, unit="W"):
+    """Big number in font_big + a smaller unit suffix (defaults to 'W')
+    baseline-aligned just after. UNIT_DY works for any tom-thumb suffix since
+    every glyph is 5 px tall."""
+    wv = d.textbbox((0, 0), num, font=font_big)[2]
+    d.text((x, top_y), num, font=font_big, fill=fill)
+    d.text((x + wv + UNIT_GAP, top_y + UNIT_DY), unit, font=font_unit, fill=fill)
+
+
+def draw_dashboard(img, d, fonts, colors, layout, snap, day_snap, batt_snap,
+                   hist, bucket_minutes):
     W, H = img.size
     d.rectangle([0, 0, W, H], fill=(0, 0, 0))
     f_big, f_small, f_axis = fonts
@@ -427,26 +490,28 @@ def draw_dashboard(img, d, fonts, colors, layout, snap, day_snap, hist,
     # snap = (prod_watt, use_nobat, grid_watt), stored in the DB as (pv, imp, exp)
     prod, use_nobat, grid = snap
 
-    # --- Top: USE left, GRID center, PV right ---
+    # --- Top: USE left, GRID center, PV right (number big, 'W' unit smaller) ---
     # Left-anchored items shifted by 1 px so they don't hug the panel edge.
     top_y = layout['top_y']
     # Left: house load excl. battery (cyan)
-    draw_aligned(d,   1, top_y, fmt_w(use_nobat) + "W", f_big, tuple(colors['use']), 'left')
+    draw_w_value(d, 1, top_y, fmt_w(use_nobat), f_big, f_small, tuple(colors['use']))
     # Center: grid power with a direction arrow -- colour + arrow show flow
     # (>=0 import: red, arrow down ; <0 export: green, arrow up)
     g = grid or 0
     grid_col = tuple(colors['imp']) if g >= 0 else tuple(colors['exp'])
-    gtxt = fmt_w(abs(g)) + "W"
+    gtxt = fmt_w(abs(g))
     aw, gap, ah = 6, 2, 8
+    total = aw + gap + w_value_width(d, gtxt, f_big, f_small)
+    ax = 64 - total // 2
+    # centre the arrow on the number's vertical extent
     bb = d.textbbox((0, 0), gtxt, font=f_big)
-    tw = bb[2] - bb[0]
-    ax = 64 - (aw + gap + tw) // 2
-    # centre the arrow on the number's actual vertical ink extent
     ay0 = top_y + round((bb[1] + bb[3]) / 2 - ah / 2)
     draw_arrow(d, ax, ay0, up=g < 0, color=grid_col, w=aw, h=ah)
-    d.text((ax + aw + gap, top_y), gtxt, font=f_big, fill=grid_col)
+    draw_w_value(d, ax + aw + gap, top_y, gtxt, f_big, f_small, grid_col)
     # Right: PV production (yellow)
-    draw_aligned(d, 128, top_y, fmt_w(prod) + "W", f_big, tuple(colors['pv']),  'right')
+    rtxt = fmt_w(prod)
+    draw_w_value(d, 128 - w_value_width(d, rtxt, f_big, f_small), top_y, rtxt,
+                 f_big, f_small, tuple(colors['pv']))
 
     chart_top = layout['chart_top']
     chart_bot = layout['chart_bot']
@@ -520,29 +585,61 @@ def draw_dashboard(img, d, fonts, colors, layout, snap, day_snap, hist,
     cL = tuple(colors['label'])
 
     if int(time.time() / 5) % 2 == 0:
-        # Page 1: 3 ratios -- Grid (blue) / Export (green) / Direct (yellow)
-        ci = tuple(colors['use']); cp = tuple(colors['pv']); ce = tuple(colors['exp'])
-        draw_aligned(d,   1, by_lbl, "Reseau", f_small, cL, 'left')
-        draw_aligned(d,  64, by_lbl, "Export", f_small, cL, 'center')
-        draw_aligned(d, 128, by_lbl, "Direct", f_small, cL, 'right')
-        draw_pvu(d,   1, by, by, "", pct(grid_p),   "%",
-                 ci, ci, f_small, f_small, 'left')
-        draw_pvu(d,  64, by, by, "", pct(export_p), "%",
-                 ce, ce, f_small, f_small, 'center')
-        draw_pvu(d, 128, by, by, "", pct(direct_p), "%",
-                 cp, cp, f_small, f_small, 'right')
+        # Page 1: battery overview -- no labels, f_big across both bottom rows
+        # Left: SOC % | Center: charge/discharge power (arrow + colour)
+        # Right: cumulative input_kwh (charged lifetime, rounded int)
+        batt, b_pow, b_in_kwh = batt_snap
+        bat_y = 52   # 8x13B drawn at y=52 -> ink rows 53..62, vertically
+                     # centred in the bottom area (rows 52..63)
+        aw, gap_a, ah = 6, 2, 8
+        c_batt = tuple(colors['batt'])
+
+        # Left: vertical battery icon (white frame, fill green > 20% / red <=)
+        # + SOC %. Icon spans the full bottom area (rows 52..63).
+        fill_c = tuple(colors['exp']) if (batt or 0) > 20 else tuple(colors['imp'])
+        ic_w = draw_battery_icon(d, 1, bat_y, batt, (255, 255, 255), fill_c)
+        btxt = "--" if batt is None else str(int(round(batt)))
+        draw_w_value(d, 1 + ic_w + 2, bat_y, btxt, f_big, f_small, c_batt, unit="%")
+
+        # Center: signed battery power -- battery-centric colours
+        # >0 discharge (battery drains)  -> up,   red
+        # <0 charge   (battery fills up) -> down, green
+        # =0 idle                        -> no arrow, plain grey value
+        bp = b_pow or 0
+        ftxt = str(int(round(abs(bp))))
+        if bp == 0:
+            col = tuple(colors['label'])
+            tw = w_value_width(d, ftxt, f_big, f_small)
+            draw_w_value(d, 64 - tw // 2, bat_y, ftxt, f_big, f_small, col)
+        else:
+            col, up = ((tuple(colors['imp']), True) if bp > 0
+                       else (tuple(colors['exp']), False))
+            total = aw + gap_a + w_value_width(d, ftxt, f_big, f_small)
+            ax = 64 - total // 2
+            fbb = d.textbbox((0, 0), ftxt, font=f_big)
+            ay0 = bat_y + round((fbb[1] + fbb[3]) / 2 - ah / 2)
+            draw_arrow(d, ax, ay0, up=up, color=col, w=aw, h=ah)
+            draw_w_value(d, ax + aw + gap_a, bat_y, ftxt, f_big, f_small, col)
+
+        # Right: cumulative input_kwh
+        ktxt = "--" if b_in_kwh is None else str(int(round(b_in_kwh)))
+        kw = w_value_width(d, ktxt, f_big, f_small, unit="kWh")
+        draw_w_value(d, 128 - kw, bat_y, ktxt, f_big, f_small, c_batt, unit="kWh")
     else:
-        # Page 2: daily kWh, value + "kWh" suffix + grey label above
+        # Page 2: daily kWh (rounded int) + matching ratio %, grey label above
         cu = tuple(colors['use']); ce = tuple(colors['exp']); cp = tuple(colors['pv'])
         draw_aligned(d,   1, by_lbl, "Conso",   f_small, cL, 'left')
         draw_aligned(d,  64, by_lbl, "Export",  f_small, cL, 'center')
         draw_aligned(d, 128, by_lbl, "Prod PV", f_small, cL, 'right')
-        draw_pvu(d,   1, by, by, "", fmt_kwh(day_use), "kWh",
-                 cu, cu, f_small, f_small, 'left')
-        draw_pvu(d,  64, by, by, "", fmt_kwh(day_exp), "kWh",
-                 ce, ce, f_small, f_small, 'center')
-        draw_pvu(d, 128, by, by, "", fmt_kwh(day_pv),  "kWh",
-                 cp, cp, f_small, f_small, 'right')
+
+        def _kwh(v):  return "--" if v is None else str(int(round(v)))
+        def _pct(p):  return "0" if p is None else str(int(round(p)))
+        s_use = f"{_kwh(day_use)}kWh {_pct(grid_p)}%"
+        s_exp = f"{_kwh(day_exp)}kWh {_pct(export_p)}%"
+        s_pv  = f"{_kwh(day_pv)}kWh {_pct(direct_p)}%"
+        draw_aligned(d,   1, by, s_use, f_small, cu, 'left')
+        draw_aligned(d,  64, by, s_exp, f_small, ce, 'center')
+        draw_aligned(d, 128, by, s_pv,  f_small, cp, 'right')
 
 
 # --- Main -----------------------------------------------------------------
@@ -610,7 +707,7 @@ def main():
         day_snap = day_totals(db, state.snapshot_kwh())
         draw_dashboard(img, d, (f_big, f_small, f_axis), cfg['colors'],
                        layout, state.snapshot(), day_snap,
-                       hist, bucket_min)
+                       state.snapshot_battery(), hist, bucket_min)
         canvas.SetImage(img)
         canvas = matrix.SwapOnVSync(canvas)
         dt = time.time() - t0

@@ -52,6 +52,12 @@ mqtt:
     #   use_kwh_no_bat   (kWh) cumulative house counter         -> bottom Conso   (daily delta)
     #   grid_export_kwh  (kWh) cumulative export counter        -> bottom Export  (daily delta)
     home: energy/home
+    # Battery aggregate JSON (used on the battery cycle page). Fields used:
+    #   batt           SOC %                              -> left
+    #   input_watt     charging power (W)                 -> centre (arrow down/red)
+    #   output_watt    discharging power (W)              -> centre (arrow up/green)
+    #   input_kwh      cumulative charged kWh (lifetime)  -> right
+    battery: energy/ecoflow/batteries/aggregate
 
 history:
   db_path: /home/pi/energy-dashboard/history.db
