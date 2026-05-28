@@ -9,12 +9,19 @@ renders:
 
 - **Top row**: instant **house use / grid / PV** in watts. The grid value in
   the centre carries a direction arrow: **down + red = import**,
-  **up + green = export**.
+  **up + green = export**. The `W` unit is rendered in a smaller font so the
+  digits keep their full size and the value stays readable.
 - **Middle**: stacked history chart (yellow = PV production,
   blue = house load excluding battery)
-- **Bottom**: cycling page between daily share ratios (Reseau / Export /
-  Direct %) and daily energy totals (Conso / Export / Prod PV kWh), computed
-  as the delta of the cumulative kWh counters since midnight
+- **Bottom**: cycles every 5 s between two pages:
+  - **Battery overview** — a vertical battery icon (white frame, fill **green
+    > 20 % / red below**, `+` terminal on top, level proportional to SOC) with
+    the SOC %, the **signed battery power** in the centre (discharge ↑ red,
+    charge ↓ green, `0W` shown without an arrow), and the **cumulative input
+    kWh** on the right.
+  - **Daily energy** — Conso / Export / Prod PV, each shown as **rounded kWh
+    + matching ratio %** (Reseau / Export / Direct), computed as the delta of
+    the cumulative kWh counters since midnight.
 
 Built for the Raspberry Pi Zero 2W with the
 [Adafruit RGB Matrix HAT (PWM)](https://www.adafruit.com/product/2345).
@@ -105,12 +112,17 @@ appear at address `0x23`.
 
 ### 6. An MQTT broker
 
-You need a broker publishing the single JSON topic described below.
+You need a broker publishing the two JSON topics described below.
 
-## MQTT payload expected
+## MQTT payloads expected
 
-The dashboard subscribes to **one** topic (`energy/home` by default, set via
-`mqtt.topics.home`). Each message is a JSON object with these fields:
+The dashboard subscribes to **two** JSON topics, both configurable in
+`mqtt.topics.*`:
+
+### `energy/home` — live power + daily energy
+
+Carries the live power values, the chart history and the daily energy totals.
+Each message is a JSON object with these fields:
 
 ```json
 {
@@ -128,24 +140,48 @@ The dashboard subscribes to **one** topic (`energy/home` by default, set via
 | `prod_watt`       | W    | Instant PV production                      | Top right (yellow) + chart (yellow) |
 | `use_watt_no_bat` | W    | Instant house load **excluding battery**  | Top left (cyan) + chart (blue) |
 | `grid_watt`       | W    | Instant grid power, **signed**: `>= 0` = import, `< 0` = export | Top centre (arrow + colour: down/red import, up/green export) |
-| `prod_kwh`        | kWh  | Cumulative PV production counter           | Bottom **Prod PV** (delta since midnight) |
-| `use_kwh_no_bat`  | kWh  | Cumulative house consumption counter (excl. battery) | Bottom **Conso** (delta since midnight) |
-| `grid_export_kwh` | kWh  | Cumulative grid export counter            | Bottom **Export** (delta since midnight) |
+| `prod_kwh`        | kWh  | Cumulative PV production counter           | Daily **Prod PV** (delta since midnight) |
+| `use_kwh_no_bat`  | kWh  | Cumulative house consumption counter (excl. battery) | Daily **Conso** (delta since midnight) |
+| `grid_export_kwh` | kWh  | Cumulative grid export counter            | Daily **Export** (delta since midnight) |
 
 > The `*_kwh` fields are **lifetime/incremental counters that are never reset
 > at midnight**. The dashboard stores the value seen at the start of each day
 > (persisted in the DB) and shows `current - midnight baseline` as "today".
-> The bottom ratios (Reseau / Export / Direct %) are derived from those three
-> daily deltas.
+> The matching ratios (Reseau / Export / Direct %) shown next to the daily kWh
+> are derived from those three daily deltas.
 
-The topic name is configurable; see `config_sample.yaml`.
+### `energy/ecoflow/batteries/aggregate` — battery overview
 
-## Feeding the topic from Home Assistant
+Used on the battery overview page (the other half of the bottom 5 s cycle).
+Typical EcoFlow aggregate payload:
+
+```json
+{
+  "batt": 84.8,
+  "power_watt": -120,
+  "input_kwh": 13.81
+}
+```
+
+| Field        | Unit | Meaning                                                     | Where it shows |
+|--------------|------|-------------------------------------------------------------|----------------|
+| `batt`       | %    | Battery state of charge                                     | Left (battery icon fill level + numeric SOC %) |
+| `power_watt` | W    | **Signed** battery flow: `> 0` = discharge (red ↑), `< 0` = charge (green ↓), `0` shows the value without an arrow | Centre |
+| `input_kwh`  | kWh  | Cumulative charged counter (lifetime, displayed as-is, rounded) | Right (rounded int + small `kWh`) |
+
+Topic names are configurable; see `config_sample.yaml`.
+
+## Feeding the topics from Home Assistant
 
 If your inverter, PV optimizers, Linky teleinfo or smart meter are already
 integrated in Home Assistant, you typically don't need any new hardware
-plumbing — just assemble the existing HA sensors into the single `energy/home`
-JSON payload and publish it with one automation.
+plumbing — just assemble the existing HA sensors into the `energy/home` JSON
+payload and publish it with one automation.
+
+The battery topic (`energy/ecoflow/batteries/aggregate`) is normally published
+directly by the EcoFlow integration on your broker, so no automation is needed
+on the HA side. Point `mqtt.topics.battery` in `config.yaml` to whichever topic
+your setup actually publishes.
 
 A few conventions help:
 
@@ -285,19 +321,24 @@ resilience on a power cut.
 
 ```
 +--------------------------------------------------------------+
-|  USEw         v GRIDw                            PVw         |
+|  USEw         v GRIDw                            PVw         |  small 'W'
 |--------------------------------------------------------------|
 |  3k ··· ······································ ·········    |
-|  2k ·····████······························ ··  ········    |
+|  2k ·····████······························ ··  ········    |  chart
 |  1k ·····████··········█·······█··········  ··  ··········  |
 |     YYYYYYYYYBBYYYYBBYYYYBBBBBYYYYBBBBYYYY  YY  YYYYBBBB     |
 |--------------------------------------------------------------|
-|   Reseau         Export           Direct                     |
-|   12%             45%              55%                       |
+|   ▆ 85%       ^ 120W                          14kWh          |  battery page
 +--------------------------------------------------------------+
 ```
 
-(Bottom row alternates every 5s with the daily kWh page.)
+The bottom area alternates every 5 s between the **battery page** shown above
+and the **daily energy page** below:
+
+```
+|   Conso         Export             Prod PV                  |
+|   2kWh 45%      0kWh 30%           0kWh 70%                 |
+```
 
 ## Acknowledgments
 
