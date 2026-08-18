@@ -1,4 +1,5 @@
 # Local user configuration (contains MQTT credentials)
+config_hyperpixel.yaml
 config.yaml
 
 # Runtime data

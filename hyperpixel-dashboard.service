@@ -1,0 +1,25 @@
+[Unit]
+Description=Energy Dashboard (HyperPixel 2.1 Round, 480x480)
+Documentation=file:///home/pi/energy-dashboard
+After=network-online.target hyperpixel2r-init.service
+Wants=network-online.target
+# Le panneau doit avoir recu sa sequence d initialisation avant qu on ecrive
+# dans le framebuffer, sinon la dalle reste noire.
+Requires=hyperpixel2r-init.service
+
+[Service]
+Type=simple
+# root est requis pour ecrire dans /dev/fb0 et desactiver la veille console.
+User=root
+WorkingDirectory=/home/pi/energy-dashboard
+ExecStart=/usr/bin/python3 /home/pi/energy-dashboard/hyperpixel_dashboard.py /home/pi/energy-dashboard/config_hyperpixel.yaml
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hyperpixel-dashboard
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,47 @@
+# Tableau de bord energie pour HyperPixel 2.1 Round (480x480).
+# Copier en config_hyperpixel.yaml et adapter.
+# Les sections mqtt et history sont identiques a celles de config_sample.yaml.
+
+display:
+  device: /dev/fb0
+  refresh_hz: 4          # 4 images/s suffisent et menagent le Zero W
+  page_seconds: 5        # alternance batterie / bilan du jour
+  history_cols: 120      # points d'historique traces dans le cadran
+  scale_w: 3000          # pleine echelle des anneaux, en watts
+  fonts:
+    path: /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+    huge:  58            # valeur centrale (maison)
+    big:   34            # solaire et reseau
+    mid:   22            # unite de la valeur centrale
+    small: 18            # unites secondaires, bilan du jour
+    tiny:  14            # etiquettes
+
+mqtt:
+  host: 192.168.1.10
+  port: 1883
+  username: CHANGE_ME
+  password: CHANGE_ME
+  client_id_prefix: hyperpixel_dashboard
+  topics:
+    home: energy/home
+    battery: energy/ecoflow/batteries/aggregate
+
+history:
+  db_path: /home/pi/energy-dashboard/history.db
+  bucket_minutes: 5
+  sample_minutes: 1
+  backup_minutes: 60
+
+# Palette OpenEnergyMonitor, completee pour le cadran rond.
+colors:
+  pv:       [255, 220,   0]   # production solaire
+  use:      [  0, 180, 255]   # consommation maison
+  exp:      [ 50, 220,  80]   # export reseau
+  imp:      [255,  60,  60]   # import reseau
+  label:    [130, 130, 130]
+  bg:       [  0,   0,   0]   # noir : l'ecran est rond, le hors-disque ne doit pas se voir
+  ring_bg:  [ 28,  32,  38]   # fond des anneaux de jauge
+  pv_fill:  [ 90,  78,   0]   # aire d'historique solaire, assombrie
+  use_fill: [  0,  64,  92]   # aire d'historique consommation, assombrie
+  batt_ok:  [ 50, 220,  80]
+  batt_low: [255,  60,  60]

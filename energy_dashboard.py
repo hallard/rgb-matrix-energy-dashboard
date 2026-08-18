@@ -23,7 +23,8 @@ from pathlib import Path
 import paho.mqtt.client as mqtt
 import yaml
 from PIL import Image, ImageDraw, ImageFont
-from rgbmatrix import RGBMatrix, RGBMatrixOptions, graphics
+# rgbmatrix n'est present que sur la cible matrice LED : import differe
+# dans setup_matrix() pour que ce module reste importable sur HyperPixel.
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -338,6 +339,7 @@ def logger_thread(ram_db, state, disk_path, sample_sec, backup_sec, window_secon
 
 # --- Display --------------------------------------------------------------
 def setup_matrix(cfg):
+    from rgbmatrix import RGBMatrix, RGBMatrixOptions
     o = RGBMatrixOptions()
     o.rows = cfg.get('rows', 64)
     o.cols = cfg.get('cols', 128)
