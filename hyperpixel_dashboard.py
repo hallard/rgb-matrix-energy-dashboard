@@ -252,21 +252,23 @@ def draw_chart(img, d, cx, cy, base_y, height, half_w, pv, use, colors, font,
         (x0, y0))
 
 
-def draw_heartbeat(d, cx, cy, r, col):
-    """Quatre points sur les diagonales du disque.
+def draw_night_tick(d, cx, cy, r, col, second):
+    """Point unique tournant sur le pourtour, comme une trotteuse.
 
-    La version matrice les place aux quatre coins ; sur une dalle ronde les
-    coins sont hors du cercle et donc invisibles. Les diagonales donnent le
-    meme repere visuel, a l'interieur de la zone affichee.
+    Un tour par minute, un pas par seconde : la position indique donc aussi
+    l'heure a la seconde pres. Remplace le clignotement fixe de la version
+    matrice, qui n'a pas la resolution pour ce genre de mouvement.
+
+    Depart a midi et sens horaire, d'ou le decalage de 90 degres : les angles
+    sont comptes depuis 3 heures.
     """
-    off = r * 0.707   # cos(45 degres)
-    for sx in (-1, 1):
-        for sy in (-1, 1):
-            d.ellipse((cx + sx * off - 4, cy + sy * off - 4,
-                       cx + sx * off + 4, cy + sy * off + 4), fill=col)
+    a = math.radians(second * 6 - 90)   # 6 degres par seconde
+    x, y = cx + r * math.cos(a), cy + r * math.sin(a)
+    d.ellipse((x - 5, y - 5, x + 5, y + 5), fill=col)
 
 
 # --------------------------------------------------------------------------
+# Mise en page# --------------------------------------------------------------------------
 # Mise en page
 # --------------------------------------------------------------------------
 
@@ -386,10 +388,8 @@ def main():
     next_load = 0.0
     layout = {'scale_w': dcfg.get('scale_w', 3000)}
 
-    # Mode nuit : cadences reprises de la version matrice.
-    NIGHT_ON = 0.25            # duree de l'impulsion
-    NIGHT_GAP_OK = 2.0         # silence quand le reseau repond
-    NIGHT_GAP_DOWN = 1.0       # silence plus court, en rouge, s'il est tombe
+    # Mode nuit : trotteuse plutot que clignotement. Le rouge signale que le
+    # reseau est tombe, comme sur la version matrice.
     night_key = None
     bl_off = dcfg.get('night_backlight_off', False)
     night_r = fb.width / 2 - 16
@@ -401,22 +401,23 @@ def main():
             # Ecran coupe par le topic MQTT. Les fils MQTT et journalisation
             # continuent : l'historique reste enregistre pendant la nuit.
             net = network_up()
-            period = NIGHT_ON + (NIGHT_GAP_OK if net else NIGHT_GAP_DOWN)
-            on = (t0 % period) < NIGHT_ON
-            key = (on, net, bl_off)
+            second = int(t0) % 60
+            key = (second, net, bl_off)
             if key != night_key:
                 if bl_off:
-                    # Dalle vraiment eteinte : le battement serait invisible,
+                    # Dalle vraiment eteinte : la trotteuse serait invisible,
                     # on ne dessine donc rien.
                     fb.backlight(False)
                 else:
                     d.rectangle((0, 0, fb.width, fb.height), fill=colors['bg'])
-                    if on:
-                        draw_heartbeat(d, fb.width / 2, fb.height / 2, night_r,
-                                       colors['exp'] if net else colors['imp'])
+                    draw_night_tick(d, fb.width / 2, fb.height / 2, night_r,
+                                    colors['exp'] if net else colors['imp'],
+                                    second)
                     fb.show(img)
                 night_key = key
-            time.sleep(0.05)   # < NIGHT_ON, pour ne pas rater l'impulsion
+            # Une seule image par seconde : on echantillonne plus finement pour
+            # ne pas decaler le pas de la trotteuse.
+            time.sleep(0.1)
             continue
 
         if night_key is not None:
