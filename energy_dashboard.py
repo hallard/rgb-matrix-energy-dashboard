@@ -53,6 +53,16 @@ class State:
         # Display power switch (Tasmota-style ON/OFF, retained). True until told
         # otherwise so the panel lights up even before the first message.
         self.display_on = True
+        # ambient light (lux) fed from MQTT -> automatic brightness
+        self.lux = None
+
+    def set_lux(self, v):
+        with self.lock:
+            self.lux = v
+
+    def get_lux(self):
+        with self.lock:
+            return self.lux
 
     def update_many(self, d):
         """Set only the keys whose value is not None (full JSON each msg)."""
@@ -193,10 +203,45 @@ def day_totals(db, snap_kwh):
 
 
 # --- Threads --------------------------------------------------------------
+def _parse_lux(payload, key=None):
+    """Extract a lux float from an MQTT payload.
+
+    Handles a bare number (`12.3` / `12.3 lx`) or a JSON object, reading
+    `key` (default `lux`/`value`). Returns None if nothing usable."""
+    try:
+        text = payload.decode(errors='ignore').strip()
+    except Exception:
+        return None
+    if not text:
+        return None
+    try:
+        j = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        j = None
+    if isinstance(j, bool):
+        return None
+    if isinstance(j, (int, float)):
+        return float(j)
+    if isinstance(j, dict):
+        v = j.get(key) if key else (j.get('lux', j.get('value')))
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+    # Fallback: leading number of a "12.3 lx" style string.
+    try:
+        return float(text.split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
 def mqtt_thread(cfg, state):
     home_topic = cfg['mqtt']['topics']['home']
     batt_topic = cfg['mqtt']['topics'].get('battery')
     disp_topic = cfg['mqtt']['topics'].get('display_power')
+    br_cfg     = cfg.get('brightness') or {}
+    lux_topic  = br_cfg.get('mqtt_topic') if br_cfg.get('source') == 'mqtt' else None
+    lux_key    = br_cfg.get('mqtt_json_key', 'lux')
 
     def on_connect(client, userdata, flags, rc):
         logging.info("MQTT connected rc=%s", rc)
@@ -205,6 +250,8 @@ def mqtt_thread(cfg, state):
             client.subscribe(batt_topic)
         if disp_topic:
             client.subscribe(disp_topic)
+        if lux_topic:
+            client.subscribe(lux_topic)
 
     def on_message(client, userdata, msg):
         # Display power switch: plain-text ON/OFF (Tasmota stat/... topic).
@@ -216,7 +263,11 @@ def mqtt_thread(cfg, state):
             state.display_on = (payload == "ON")
             logging.info("Display power -> %s", payload)
             return
-
+        if lux_topic and msg.topic == lux_topic:
+            v = _parse_lux(msg.payload, lux_key)
+            if v is not None:
+                state.set_lux(v)
+            return
         try:
             j = json.loads(msg.payload.decode())
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -269,28 +320,43 @@ def mqtt_thread(cfg, state):
             time.sleep(5)
 
 
-def brightness_thread(matrix, cfg):
-    """Adjust matrix.brightness from ambient light (LTR-559 over I2C)."""
-    try:
-        from ltr559 import LTR559
-    except ImportError:
-        logging.warning("ltr559 lib missing - static brightness")
-        return
-    try:
-        sensor = LTR559()
-    except Exception as e:
-        logging.warning("LTR-559 init failed (%s) - static brightness", e)
-        return
+def brightness_thread(matrix, cfg, state):
+    """Adjust matrix.brightness from ambient light.
 
-    gain = cfg.get('sensor_gain')
-    integ = cfg.get('sensor_integration_ms')
-    try:
-        if gain is not None:
-            sensor.set_light_options(gain=gain)
-        if integ is not None:
-            sensor.set_light_integration_time_ms(integ)
-    except Exception as e:
-        logging.warning("LTR-559 sensor tuning failed (%s)", e)
+    Light comes either from the local LTR-559 sensor (`source: sensor`)
+    or from lux values arriving over MQTT (`source: mqtt`), which
+    mqtt_thread stores in `state.lux`. The lux -> brightness mapping
+    (min/max, lux_min/lux_max, EMA smoothing) is identical either way."""
+    source = cfg.get('source', 'sensor')
+
+    if source == 'mqtt':
+        def read_lux():
+            return state.get_lux()
+    else:
+        try:
+            from ltr559 import LTR559
+        except ImportError:
+            logging.warning("ltr559 lib missing - static brightness")
+            return
+        try:
+            sensor = LTR559()
+        except Exception as e:
+            logging.warning("LTR-559 init failed (%s) - static brightness", e)
+            return
+
+        gain = cfg.get('sensor_gain')
+        integ = cfg.get('sensor_integration_ms')
+        try:
+            if gain is not None:
+                sensor.set_light_options(gain=gain)
+            if integ is not None:
+                sensor.set_light_integration_time_ms(integ)
+        except Exception as e:
+            logging.warning("LTR-559 sensor tuning failed (%s)", e)
+
+        def read_lux():
+            sensor.update_sensor()
+            return sensor.get_lux()
 
     bmin  = cfg.get('min', 15)
     bmax  = cfg.get('max', 80)
@@ -303,10 +369,12 @@ def brightness_thread(matrix, cfg):
     ema = None
     while True:
         try:
-            sensor.update_sensor()
-            lux = sensor.get_lux()
+            lux = read_lux()
         except Exception as e:
-            logging.error("LTR-559 read: %s", e)
+            logging.error("brightness read (%s): %s", source, e)
+            time.sleep(poll)
+            continue
+        if lux is None:          # no MQTT lux received yet -> leave brightness as is
             time.sleep(poll)
             continue
         ema = lux if ema is None else alpha * lux + (1 - alpha) * ema
@@ -734,7 +802,7 @@ def main():
                      daemon=True).start()
     br_cfg = cfg.get('brightness') or {}
     if br_cfg.get('enabled', False):
-        threading.Thread(target=brightness_thread, args=(matrix, br_cfg),
+        threading.Thread(target=brightness_thread, args=(matrix, br_cfg, state),
                          daemon=True).start()
 
     refresh = 1.0 / cfg['display'].get('refresh_hz', 4)

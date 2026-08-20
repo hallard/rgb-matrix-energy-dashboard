@@ -42,8 +42,9 @@ sample programs working first (e.g. `demo`, `runtext`, `image-viewer`). Once
 those render correctly on your hardware you will know the exact options to
 plug into the YAML config here.
 
-Optionally adapts the matrix brightness from ambient light using a
-**Pimoroni LTR-559** light sensor on the I2C bus.
+Optionally adapts the matrix brightness from ambient light, either from a
+local **Pimoroni LTR-559** sensor on the I2C bus, or from a lux value pushed
+over MQTT (handy when the sensor lives on another device).
 
 ## Hardware
 
@@ -322,14 +323,41 @@ sudo journalctl -u energy-dashboard -f
 
 ## Brightness control
 
-If the LTR-559 is connected and `brightness.enabled: true`, the matrix
-brightness ramps between `min` and `max` as the measured lux moves between
-`lux_min` and `lux_max`, with exponential smoothing (`ema_alpha`).
+When `brightness.enabled: true`, the matrix brightness ramps between `min`
+and `max` as the measured lux moves between `lux_min` and `lux_max`, with
+exponential smoothing (`ema_alpha`). Two lux sources are supported.
 
-Because the sensor sits behind the panel, readings are heavily attenuated.
-Run the dashboard for a day, watch the `LTR-559 read` / brightness values in
-the logs (`journalctl -u energy-dashboard -f`), and tune `lux_min` / `lux_max`
+### Local sensor (`source: sensor`, default)
+
+Uses the Pimoroni LTR-559 on the I2C bus. Because the sensor sits behind
+the panel, readings are heavily attenuated: run the dashboard for a day,
+watch the `brightness read (sensor)` / brightness values in the logs
+(`journalctl -u energy-dashboard -f`), and tune `lux_min` / `lux_max`
 accordingly.
+
+### Remote lux over MQTT (`source: mqtt`)
+
+Useful when the LTR-559 (or any other lux source) lives on another device
+and its value is already published on your broker. Set:
+
+```yaml
+brightness:
+  enabled: true
+  source: mqtt
+  mqtt_topic: sensors/livingroom/lux
+  mqtt_json_key: lux         # only used if the payload is JSON
+  min: 15
+  max: 80
+  lux_min: 0.5
+  lux_max: 300
+  poll_seconds: 1
+  ema_alpha: 0.4
+```
+
+The payload can be a bare number (`12.3`, `12.3 lx`) or a JSON object
+(`{"lux": 12.3}` — the key is `mqtt_json_key`, default `lux`, falling back
+to `value`). Until the first lux message arrives the matrix stays at its
+static brightness.
 
 ## SD card wear
 

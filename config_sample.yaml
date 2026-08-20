@@ -85,10 +85,14 @@ colors:
   dim:   [ 50,  50,  50]
   frame: [ 90,  90,  90]   # frame around the chart
 
-# Automatic brightness adjustment via LTR-559 (I2C 0x23).
-# Disable this section (or set enabled: false) if you don't have the sensor.
+# Automatic brightness adjustment.
+# Two sources supported:
+#   sensor -> local Pimoroni LTR-559 on the I2C bus (default)
+#   mqtt   -> subscribe to `mqtt_topic` and use the received lux value
+# Disable the whole section (or set enabled: false) to keep a static brightness.
 brightness:
   enabled: true
+  source: sensor     # sensor | mqtt
   min: 15            # min brightness (night/dark)
   max: 80            # max brightness (sunny day)
   # Sensor sits behind the matrix -> readings are heavily attenuated.
@@ -97,5 +101,12 @@ brightness:
   lux_max: 30        # lux >= this threshold -> brightness = max
   poll_seconds: 1    # sensor polling period
   ema_alpha: 0.4     # exponential smoothing: 1=instant, 0.1=very smooth
+  # --- source: sensor ------------------------------------------------------
   sensor_gain: 4            # LTR-559 gain: 1, 2, 4, 8, 48, 96 (default 4)
   sensor_integration_ms: 100  # 50, 100, 150, 200, 250, 300, 350, 400 ms
+  # --- source: mqtt --------------------------------------------------------
+  # Topic carrying the lux value. Payload can be a bare number ("12.3" or
+  # "12.3 lx") or a JSON object -- in which case `mqtt_json_key` (default
+  # `lux`, fallback `value`) selects the field.
+  # mqtt_topic: sensors/livingroom/lux
+  # mqtt_json_key: lux
