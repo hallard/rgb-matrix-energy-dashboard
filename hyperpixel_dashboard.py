@@ -22,7 +22,9 @@ from PIL import Image, ImageDraw, ImageFont
 from energy_dashboard import (State, day_totals, fmt_axis, fmt_kwh, init_db,
                               load_history, logger_thread, mqtt_thread,
                               network_up, nice_step, persist_to_disk)
+import night_clock
 from fb_display import FramebufferDisplay
+from touch import TouchWatcher
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -388,9 +390,14 @@ def main():
     next_load = 0.0
     layout = {'scale_w': dcfg.get('scale_w', 3000)}
 
-    # Mode nuit : trotteuse plutot que clignotement. Le rouge signale que le
-    # reseau est tombe, comme sur la version matrice.
+    # Mode nuit : deux presentations, l'appui sur la dalle bascule de l'une a
+    # l'autre. Le rouge signale que le reseau est tombe, comme sur la matrice.
     night_key = None
+    night_style = dcfg.get('night_style', 'clock')
+    touch = TouchWatcher()
+    touch.start()
+    last_taps = touch.taps
+    logging.info("tactile : %s", touch.device or "absent")
     bl_off = dcfg.get('night_backlight_off', False)
     night_r = fb.width / 2 - 16
 
@@ -400,23 +407,35 @@ def main():
         if not state.display_on:
             # Ecran coupe par le topic MQTT. Les fils MQTT et journalisation
             # continuent : l'historique reste enregistre pendant la nuit.
+            if touch.taps != last_taps:
+                last_taps = touch.taps
+                night_style = 'dot' if night_style == 'clock' else 'clock'
+                night_key = None   # force le redessin immediat
+                logging.info("mode nuit -> %s", night_style)
+
             net = network_up()
-            second = int(t0) % 60
-            key = (second, net, bl_off)
+            tm = time.localtime(t0)
+            key = (tm.tm_sec, net, bl_off, night_style)
             if key != night_key:
                 if bl_off:
-                    # Dalle vraiment eteinte : la trotteuse serait invisible,
-                    # on ne dessine donc rien.
+                    # Dalle vraiment eteinte : rien ne serait visible.
                     fb.backlight(False)
                 else:
                     d.rectangle((0, 0, fb.width, fb.height), fill=colors['bg'])
-                    draw_night_tick(d, fb.width / 2, fb.height / 2, night_r,
-                                    colors['exp'] if net else colors['imp'],
-                                    second)
+                    if night_style == 'clock':
+                        # Toujours rouge : c'est la couleur de la pendule
+                        # d'origine. L'etat du reseau reste signale par l'autre
+                        # presentation, accessible d'un appui.
+                        night_clock.draw_clock(d, fb.width / 2, fb.height / 2,
+                                               night_r, colors['clock'], tm)
+                    else:
+                        draw_night_tick(d, fb.width / 2, fb.height / 2, night_r,
+                                        colors['exp'] if net else colors['imp'],
+                                        tm.tm_sec)
                     fb.show(img)
                 night_key = key
-            # Une seule image par seconde : on echantillonne plus finement pour
-            # ne pas decaler le pas de la trotteuse.
+            # Une image par seconde : on echantillonne plus finement pour ne
+            # pas decaler le pas de la seconde.
             time.sleep(0.1)
             continue
 

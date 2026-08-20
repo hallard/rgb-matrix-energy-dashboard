@@ -49,6 +49,7 @@ colors:
   bg:       [  0,   0,   0]   # noir : l'ecran est rond, le hors-disque ne doit pas se voir
   ring_bg:  [ 28,  32,  38]   # fond des anneaux de jauge
   batt:     [255, 150,   0]   # ambre : etat de charge batterie
+  clock:    [255,  40,  40]   # pendule de nuit : rouge, comme l originale
   # Aires du graphique, en RGBA : la composante alpha permet de les
   # superposer sans que la seconde masque la premiere.
   pv_area:  [255, 175,   0, 215]   # jaune ambre, proche de la batterie
