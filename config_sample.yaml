@@ -58,6 +58,10 @@ mqtt:
     #   output_watt    discharging power (W)              -> centre (arrow up/green)
     #   input_kwh      cumulative charged kWh (lifetime)  -> right
     battery: energy/ecoflow/batteries/aggregate
+    # Optional: plain-text ON/OFF (Tasmota stat/... topic). When OFF the panel
+    # is blanked (handy at night); MQTT + history keep running.
+    # Leave commented to always keep the display on.
+    # display_power: stat/your-tasmota/POWER
 
 history:
   db_path: /home/pi/energy-dashboard/history.db

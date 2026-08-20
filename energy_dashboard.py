@@ -50,6 +50,9 @@ class State:
         self.batt_power_watt = None       # net (W), informational
         self.batt_input_kwh = None        # cumulative charged (kWh, lifetime)
         self.batt_output_kwh = None       # cumulative discharged (kWh)
+        # Display power switch (Tasmota-style ON/OFF, retained). True until told
+        # otherwise so the panel lights up even before the first message.
+        self.display_on = True
 
     def update_many(self, d):
         """Set only the keys whose value is not None (full JSON each msg)."""
@@ -193,14 +196,27 @@ def day_totals(db, snap_kwh):
 def mqtt_thread(cfg, state):
     home_topic = cfg['mqtt']['topics']['home']
     batt_topic = cfg['mqtt']['topics'].get('battery')
+    disp_topic = cfg['mqtt']['topics'].get('display_power')
 
     def on_connect(client, userdata, flags, rc):
         logging.info("MQTT connected rc=%s", rc)
         client.subscribe(home_topic)
         if batt_topic:
             client.subscribe(batt_topic)
+        if disp_topic:
+            client.subscribe(disp_topic)
 
     def on_message(client, userdata, msg):
+        # Display power switch: plain-text ON/OFF (Tasmota stat/... topic).
+        if disp_topic and msg.topic == disp_topic:
+            try:
+                payload = msg.payload.decode().strip().upper()
+            except UnicodeDecodeError:
+                return
+            state.display_on = (payload == "ON")
+            logging.info("Display power -> %s", payload)
+            return
+
         try:
             j = json.loads(msg.payload.decode())
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -481,6 +497,33 @@ def draw_w_value(d, x, top_y, num, font_big, font_unit, fill, unit="W"):
     d.text((x + wv + UNIT_GAP, top_y + UNIT_DY), unit, font=font_unit, fill=fill)
 
 
+_NET_CACHE = {'ts': 0.0, 'up': True}
+
+
+def network_up(ttl=5.0):
+    """True if any non-loopback interface is up (wifi or ethernet).
+    Cached for `ttl` seconds so it's cheap to call from the render loop."""
+    now = time.time()
+    if now - _NET_CACHE['ts'] < ttl:
+        return _NET_CACHE['up']
+    up = False
+    try:
+        for p in Path('/sys/class/net').iterdir():
+            if p.name == 'lo':
+                continue
+            try:
+                if p.joinpath('operstate').read_text().strip() == 'up':
+                    up = True
+                    break
+            except OSError:
+                continue
+    except OSError:
+        up = True   # can't tell -> don't false-alarm
+    _NET_CACHE['ts'] = now
+    _NET_CACHE['up'] = up
+    return up
+
+
 def draw_dashboard(img, d, fonts, colors, layout, snap, day_snap, batt_snap,
                    hist, bucket_minutes):
     W, H = img.size
@@ -699,8 +742,35 @@ def main():
     next_load = 0.0
     layout = cfg['display']['layout']
 
+    W_img, H_img = img.size
+    NIGHT_ON_SEC       = 0.25   # blink pulse width
+    NIGHT_OFF_OK_SEC   = 2.0    # gap when the network is up  -> green
+    NIGHT_OFF_DOWN_SEC = 1.0    # gap when the network is down -> red (faster)
+    night_last_key = None       # (on, net_up) actually pushed
     while True:
         t0 = time.time()
+        if not state.display_on:
+            # Display switched OFF -- blank frame with a short heartbeat on the
+            # four corners so the panel visibly stays alive at night. Green if
+            # the network is up, red + faster cadence if it's down.
+            # MQTT / logger threads keep running so history is still recorded.
+            net_up = network_up()
+            period = NIGHT_ON_SEC + (NIGHT_OFF_OK_SEC if net_up else NIGHT_OFF_DOWN_SEC)
+            on = (t0 % period) < NIGHT_ON_SEC
+            key = (on, net_up)
+            if key != night_last_key:
+                d.rectangle([0, 0, W_img, H_img], fill=(0, 0, 0))
+                if on:
+                    col = (0, 255, 0) if net_up else (255, 0, 0)
+                    for x, y in ((0, 0), (W_img - 1, 0),
+                                 (0, H_img - 1), (W_img - 1, H_img - 1)):
+                        d.point((x, y), fill=col)
+                canvas.SetImage(img)
+                canvas = matrix.SwapOnVSync(canvas)
+                night_last_key = key
+            time.sleep(0.05)  # < NIGHT_ON_SEC so the 250 ms pulse isn't missed
+            continue
+        night_last_key = None
         if t0 >= next_load:
             hist = load_history(db, bucket_min, graph_cols)
             next_load = t0 + 30
