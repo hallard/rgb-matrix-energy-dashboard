@@ -19,28 +19,21 @@ from pathlib import Path
 import yaml
 from PIL import Image, ImageDraw, ImageFont
 
-from energy_dashboard import (State, day_totals, fmt_kwh, init_db, load_history,
-                              logger_thread, mqtt_thread, persist_to_disk)
+from energy_dashboard import (State, day_totals, fmt_axis, fmt_kwh, init_db,
+                              load_history, logger_thread, mqtt_thread,
+                              nice_step, persist_to_disk)
 from fb_display import FramebufferDisplay
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 
 # --------------------------------------------------------------------------
-# Primitives circulaires
+# Primitives
 # --------------------------------------------------------------------------
 
-def ring(d, cx, cy, r, width, frac, col, bg):
-    """Arc de jauge partant de midi, dans le sens horaire.
-
-    PIL compte les angles depuis 3 heures ; le decalage de 90 degres donne la
-    convention attendue sur un cadran.
-    """
-    box = (cx - r, cy - r, cx + r, cy + r)
-    d.arc(box, 0, 360, fill=bg, width=width)
-    frac = max(0.0, min(1.0, frac))
-    if frac > 0.002:
-        d.arc(box, -90, -90 + 360 * frac, fill=col, width=width)
+def chord(clip_r, dy):
+    """Demi-largeur disponible dans le disque a une distance verticale dy."""
+    return math.sqrt(max(1.0, clip_r * clip_r - dy * dy))
 
 
 def centered(d, cx, y, txt, font, fill):
@@ -48,23 +41,33 @@ def centered(d, cx, y, txt, font, fill):
     d.text((cx - (b[2] - b[0]) / 2 - b[0], y), txt, font=font, fill=fill)
 
 
-def value_unit(d, cx, y, value, unit, f_val, f_unit, c_val, c_unit):
+def value_unit(d, cx, y, value, unit, f_val, f_unit, c_val, c_unit,
+               arrow_up=None):
     """Nombre et unite sur une ligne, l'ensemble centre sur cx.
 
     L'unite est plus petite et calee sur la base du nombre : les chiffres
     gardent ainsi toute leur taille, ce qui compte sur un cadran ou la valeur
     doit se lire de loin.
+
+    Si arrow_up est fourni, la fleche fait partie du bloc et entre dans le
+    centrage. A position fixe, elle se retrouverait collee a la valeur ou
+    eloignee selon le nombre de chiffres.
     """
     bv = d.textbbox((0, 0), value, font=f_val)
     bu = d.textbbox((0, 0), unit, font=f_unit)
     wv, wu, gap = bv[2] - bv[0], bu[2] - bu[0], 6
-    x = cx - (wv + gap + wu) / 2
+    aw, a_gap = (13, 10) if arrow_up is not None else (0, 0)
+    x = cx - (aw + a_gap + wv + gap + wu) / 2
+    if arrow_up is not None:
+        arrow(d, x + aw / 2, y + (bv[1] + bv[3]) / 2, arrow_up, c_val,
+              w=aw, h=16)
+        x += aw + a_gap
     d.text((x - bv[0], y), value, font=f_val, fill=c_val)
     d.text((x + wv + gap - bu[0], y + (bv[3] - bv[1]) - (bu[3] - bu[1])),
            unit, font=f_unit, fill=c_unit)
 
 
-def arrow(d, cx, cy, up, col, w=13, h=15):
+def arrow(d, cx, cy, up, col, w=11, h=13):
     """Montante pour l'export, descendante pour l'import."""
     pts = ([(cx, cy - h / 2), (cx - w / 2, cy + h / 2), (cx + w / 2, cy + h / 2)]
            if up else
@@ -72,44 +75,177 @@ def arrow(d, cx, cy, up, col, w=13, h=15):
     d.polygon(pts, fill=col)
 
 
-def sparkline(d, cx, cy, half_w, base_y, height, layers, clip_r):
-    """Historique borne au disque.
+def battery_color(soc, colors):
+    """Trois paliers plutot qu'un seuil unique : vert au-dessus de 60 %,
+    ambre entre 20 et 60, rouge en dessous. Reprend la palette du reste du
+    tableau de bord."""
+    if soc is None:
+        return colors['label']
+    if soc > 60:
+        return colors['exp']
+    if soc > 20:
+        return colors['batt']
+    return colors['imp']
 
-    Chaque couche precise son rendu : « fill » pour une aire, « line » pour une
-    courbe. Deux aires superposees se masquent l'une l'autre ; une aire plus une
-    courbe reste lisible.
 
-    Sur un ecran rond la largeur utilisable depend de la hauteur : on la ramene
-    a la corde du cercle a ce niveau plutot que de laisser le trace sortir.
+def draw_flow(d, cx, top, h, charging, col, phase, n=3, w=15, ch=9, gap=5):
+    """Chevrons animes indiquant le sens du courant batterie.
+
+    Ils defilent vers le haut en charge, vers le bas en decharge : un seul est
+    allume a la fois, les autres restent en teinte sourde. A 4 images par
+    seconde le defilement se lit bien sans clignoter.
     """
-    vals = [abs(v) for serie, _, _ in layers for v in (serie or []) if v]
+    total = n * ch + (n - 1) * gap
+    y0 = top + (h - total) / 2
+    lit = (n - 1 - phase) if charging else phase
+    for i in range(n):
+        y = y0 + i * (ch + gap)
+        c = col if i == lit else tuple(v // 4 for v in col)
+        pts = ([(cx, y), (cx - w / 2, y + ch), (cx + w / 2, y + ch)] if charging
+               else [(cx, y + ch), (cx - w / 2, y), (cx + w / 2, y)])
+        d.polygon(pts, fill=c)
+
+
+def battery_color(soc, colors):
+    """Trois paliers plutot qu'un seuil unique : vert au-dessus de 60 %,
+    ambre entre 20 et 60, rouge en dessous. Reprend la palette du reste du
+    tableau de bord."""
+    if soc is None:
+        return colors['label']
+    if soc > 60:
+        return colors['exp']
+    if soc > 20:
+        return colors['batt']
+    return colors['imp']
+
+
+def draw_battery(d, cx, top, soc, power, colors, font, phase=0, w=30, h=52):
+    """Icone batterie verticale : chevrons de sens a gauche, corps au centre,
+    pourcentage et puissance empiles a droite. L'ensemble est centre sur cx.
+
+    Verticale parce que le remplissage se lit alors comme un niveau, ce qui
+    est plus immediat qu'une barre horizontale.
+
+    Deux couleurs distinctes, car elles disent deux choses differentes : le
+    niveau colore l'icone et le pourcentage, le sens du courant colore les
+    chevrons et la puissance. Une batterie pleine en decharge affichait
+    autrement une puissance verte, ce qui pretait a confusion.
+    """
+    lvl_col = battery_color(soc, colors)
+    charging = power is not None and power < 0
+    flow_col = colors['exp'] if charging else colors['batt']
+
+    l1 = "--" if soc is None else "%d%%" % round(soc)
+    # Le signe de `power` (positif = decharge) sert a orienter les chevrons,
+    # il n'est pas affiche : la fleche dit deja le sens.
+    l2 = "%d W" % round(abs(power)) if power else ""
+
+    b1 = d.textbbox((0, 0), l1, font=font)
+    b2 = d.textbbox((0, 0), l2, font=font) if l2 else (0, 0, 0, 0)
+    tw = max(b1[2] - b1[0], b2[2] - b2[0])
+    fw, f_gap = (15, 10) if power else (0, 0)   # largeur et marge des chevrons
+    gap = 14
+    x = cx - (fw + f_gap + w + gap + tw) / 2
+
+    if power:
+        draw_flow(d, x + fw / 2, top, h, charging, flow_col, phase)
+        x += fw + f_gap
+
+    nub_h = 5
+    d.rounded_rectangle((x + w * 0.32, top, x + w * 0.68, top + nub_h), 2,
+                        fill=colors['label'])
+    d.rounded_rectangle((x, top + nub_h, x + w, top + h), 4,
+                        outline=colors['label'], width=2)
+    if soc is not None:
+        inner_h = (h - nub_h - 8) * max(0.0, min(1.0, soc / 100.0))
+        if inner_h > 2:
+            d.rounded_rectangle((x + 4, top + h - 4 - inner_h, x + w - 4,
+                                 top + h - 4), 2, fill=lvl_col)
+
+    tx = x + w + gap
+    if l2:
+        d.text((tx - b1[0], top + 2), l1, font=font, fill=lvl_col)
+        d.text((tx - b2[0], top + h / 2 + 1), l2, font=font, fill=flow_col)
+    else:
+        d.text((tx - b1[0], top + h / 2 - (b1[3] - b1[1]) / 2 - b1[1]), l1,
+               font=font, fill=lvl_col)
+
+
+def draw_chart(img, d, cx, cy, base_y, height, half_w, pv, use, colors, font,
+               clip_r):
+    """Historique : production et consommation, toutes deux en aires pleines.
+
+    Les aires sont peintes sur un calque RGBA puis composees en transparence.
+    Dessinees directement l'une sur l'autre, la seconde masquerait la premiere
+    partout ou elle est plus haute. Le calque se limite a la bande du
+    graphique : composer 480x480 a chaque image serait inutilement couteux sur
+    un ARMv6.
+
+    Chaque trait est borne a la corde du cercle a sa propre hauteur : sur un
+    ecran rond la largeur utile diminue des qu'on s'ecarte du centre, et un
+    trace a largeur constante deborderait de la dalle.
+    """
+    vals = [abs(v) for serie in (pv, use) for v in (serie or []) if v]
     if not vals:
         return
-    dy = abs(base_y - cy)
-    half_w = min(half_w, math.sqrt(max(1.0, clip_r * clip_r - dy * dy)) - 10)
-    peak = max(vals) or 1.0
-    for serie, col, mode in layers:
+    peak = max(vals)
+    step = nice_step(peak)
+    top = max(peak, step)
+
+    def half_at(y):
+        return min(half_w, chord(clip_r, abs(y - cy)) - 8)
+
+    level = step
+    while level <= top + 1e-6:
+        y = base_y - (level / top) * height
+        hw = half_at(y)
+        d.line((cx - hw, y, cx + hw, y), fill=colors['grid'], width=1)
+        d.text((cx - hw + 3, y - 13), fmt_axis(level), font=font,
+               fill=colors['label'])
+        level += step
+
+    hw_base = half_at(base_y)
+    d.line((cx - hw_base, base_y, cx + hw_base, base_y),
+           fill=colors['label'], width=1)
+
+    x0, y0 = int(cx - hw_base) - 2, int(base_y - height) - 2
+    x1, y1 = int(cx + hw_base) + 2, int(base_y) + 2
+    layer = Image.new('RGBA', (x1 - x0, y1 - y0), (0, 0, 0, 0))
+    ld = ImageDraw.Draw(layer)
+
+    def area(serie, rgba):
         serie = list(serie or [])
         if len(serie) < 2:
-            continue
-        step = (2 * half_w) / (len(serie) - 1)
-        pts = [(cx - half_w + i * step, base_y - (abs(v) / peak) * height)
-               for i, v in enumerate(serie)]
-        if mode == "fill":
-            d.polygon(pts + [(cx + half_w, base_y), (cx - half_w, base_y)],
-                      fill=col)
-        else:
-            d.line(pts, fill=col, width=2, joint="curve")
+            return
+        stepx = (2 * hw_base) / (len(serie) - 1)
+        pts = []
+        for i, v in enumerate(serie):
+            y = base_y - (abs(v) / top) * height
+            hw = half_at(y)
+            x = min(max(cx - hw_base + i * stepx, cx - hw), cx + hw)
+            pts.append((x - x0, y - y0))
+        ld.polygon(pts + [(pts[-1][0], base_y - y0), (pts[0][0], base_y - y0)],
+                   fill=rgba)
+
+    area(pv, colors['pv_area'])
+    area(use, colors['use_area'])
+    img.paste(Image.alpha_composite(
+        img.crop((x0, y0, x1, y1)).convert('RGBA'), layer).convert('RGB'),
+        (x0, y0))
 
 
 # --------------------------------------------------------------------------
 # Mise en page
 # --------------------------------------------------------------------------
 
-def draw_round(img, d, fonts, colors, snap, day, batt, hist, page, cfg):
-    f_huge, f_big, f_mid, f_small, f_tiny = fonts
+def draw_round(img, d, fonts, colors, snap, day, batt, hist, cfg,
+               phase=0):
+    """Sans anneaux de jauge : les valeurs sont deja lisibles en chiffres, et
+    la bordure recuperee profite au graphique, qui est l'element principal."""
+    f_huge, f_big, f_mid, f_small, f_tiny, f_bottom = fonts
     cx = cy = img.size[0] // 2
     R = img.size[0] // 2
+    usable = R - 8
 
     pv, use, grid = (v or 0 for v in snap)
     day_prod, day_use, day_exp = day
@@ -117,59 +253,34 @@ def draw_round(img, d, fonts, colors, snap, day, batt, hist, page, cfg):
 
     d.rectangle((0, 0, img.size[0], img.size[1]), fill=colors['bg'])
 
-    peak = max(cfg['scale_w'], use, pv, abs(grid))
-    ring(d, cx, cy, R - 16, 22, use / peak, colors['use'], colors['ring_bg'])
-    ring(d, cx, cy, R - 46, 14, pv / peak, colors['pv'], colors['ring_bg'])
-
-    # Rythme vertical : la police « huge » fait 58 px, il faut donc au moins
-    # 70 px entre le haut d'une valeur et l'etiquette suivante, sinon les
-    # etiquettes viennent se poser sur les chiffres.
-    centered(d, cx, cy - 158, "MAISON", f_tiny, colors['label'])
-    value_unit(d, cx, cy - 140, "%d" % round(use), "W", f_huge, f_mid,
+    value_unit(d, cx, cy - 208, "%d" % round(use), "W", f_huge, f_mid,
                colors['use'], colors['label'])
 
-    centered(d, cx, cy - 64, "SOLAIRE", f_tiny, colors['label'])
-    value_unit(d, cx, cy - 46, "%d" % round(pv), "W", f_big, f_small,
-               colors['pv'], colors['label'])
-
-    # Reseau : la fleche donne le sens, la couleur le confirme.
     imported = grid >= 0
     gcol = colors['imp'] if imported else colors['exp']
-    centered(d, cx, cy + 4, "RESEAU", f_tiny, colors['label'])
-    value_unit(d, cx + 12, cy + 22, "%d" % round(abs(grid)), "W",
-               f_big, f_small, gcol, colors['label'])
-    arrow(d, cx - 56, cy + 40, not imported, gcol)
+    centered(d, cx - 100, cy - 144, "SOLAIRE", f_tiny, colors['label'])
+    value_unit(d, cx - 100, cy - 126, "%d" % round(pv), "W", f_big, f_small,
+               colors['pv'], colors['label'])
+    centered(d, cx + 100, cy - 144, "RESEAU", f_tiny, colors['label'])
+    value_unit(d, cx + 100, cy - 126, "%d" % round(abs(grid)), "W",
+               f_big, f_small, gcol, colors['label'], arrow_up=not imported)
 
-    # Historique : production en jaune, consommation en bleu.
-    sparkline(d, cx, cy, 150, cy + 104, 34,
-              [(hist[0], colors['pv_fill'], 'fill'),
-               (hist[1], colors['use'], 'line')],
-              R - 24)
+    draw_chart(img, d, cx, cy, cy + 92, 166, 205, hist[0], hist[1],
+               colors, f_tiny, usable)
 
-    # Bandeau bas alterne, comme sur la version matrice.
-    if page == 0 and soc is not None:
-        bcol = colors['batt_ok'] if soc > 20 else colors['batt_low']
-        bar_w, bar_h = 156, 11
-        x0, y0 = cx - bar_w // 2, cy + 122
-        d.rounded_rectangle((x0, y0, x0 + bar_w, y0 + bar_h), 5,
-                            outline=colors['label'], width=1)
-        fw = int(bar_w * max(0.0, min(1.0, soc / 100.0)))
-        if fw > 2:
-            d.rounded_rectangle((x0, y0, x0 + fw, y0 + bar_h), 5, fill=bcol)
-        txt = "%d%%" % round(soc)
-        if bpower:
-            # Signe : positif = decharge, negatif = charge.
-            txt += "   %+d W" % round(bpower)
-        centered(d, cx, cy + 142, txt, f_small, bcol)
-    else:
-        for i, (name, val, col) in enumerate(
-                (("Conso", day_use, colors['use']),
-                 ("Prod", day_prod, colors['pv']),
-                 ("Export", day_exp, colors['exp']))):
-            x = cx + (i - 1) * 74
-            centered(d, x, cy + 118, name, f_tiny, colors['label'])
-            centered(d, x, cy + 136,
-                     fmt_kwh(val) if val is not None else "--", f_small, col)
+    for i, (name, val, col) in enumerate(
+            (("Conso", day_use, colors['use']),
+             ("Prod", day_prod, colors['pv']),
+             ("Export", day_exp, colors['exp']))):
+        x = cx + (i - 1) * 88
+        centered(d, x, cy + 100, name, f_tiny, colors['label'])
+        centered(d, x, cy + 118,
+                 fmt_kwh(val) if val is not None else "--", f_bottom, col)
+
+    # Batterie au plus bas : le bloc fait 144 px de large, or a cette hauteur
+    # la corde se referme vite. Mesure faite, y + 166 laisse 1 px de marge sous
+    # le texte avant le bord utile du disque.
+    draw_battery(d, cx, cy + 166, soc, bpower, colors, f_bottom, phase)
 
     # La dalle est ronde : ce qui deborde du disque serait dessine dans le vide.
     d.ellipse((-3, -3, img.size[0] + 3, img.size[1] + 3),
@@ -197,23 +308,29 @@ def main():
     bucket_min = cfg['history']['bucket_minutes']
     sample_sec = cfg['history'].get('sample_minutes', bucket_min) * 60
     backup_sec = cfg['history'].get('backup_minutes', 60) * 60
-    hist_cols = dcfg.get('history_cols', 120)
-    window_sec = bucket_min * 60 * hist_cols
+    hist_cols = dcfg.get('history_cols', 288)
+    # Retention et fenetre affichee sont independantes : l'ecran montre 24 h,
+    # mais la base en garde plusieurs jours pour pouvoir naviguer au tactile.
+    # load_history() ne lit que la fenetre demandee, le reste est ignore.
+    retain_sec = int(cfg['history'].get('retain_days', 7) * 86400)
 
     def _flush(*_):
         persist_to_disk(db, str(db_path))
-        sys.exit(0)
+        sys.exit(0)   # atexit rend le framebuffer a la console
     atexit.register(lambda: persist_to_disk(db, str(db_path)))
     signal.signal(signal.SIGTERM, _flush)
     signal.signal(signal.SIGINT, _flush)
 
     fb = FramebufferDisplay(dcfg.get('device', '/dev/fb0'))
     fb.blank(True)
+    if dcfg.get('take_over_console', True):
+        logging.info("console texte detachee : %s", fb.takeover())
+    atexit.register(fb.release)
     logging.info("framebuffer %dx%d", fb.width, fb.height)
 
     fcfg = dcfg['fonts']
     fonts = tuple(load_font(fcfg['path'], fcfg[k])
-                  for k in ('huge', 'big', 'mid', 'small', 'tiny'))
+                  for k in ('huge', 'big', 'mid', 'small', 'tiny', 'bottom'))
 
     img = Image.new('RGB', (fb.width, fb.height))
     d = ImageDraw.Draw(img)
@@ -221,12 +338,11 @@ def main():
     threading.Thread(target=mqtt_thread, args=(cfg, state), daemon=True).start()
     threading.Thread(target=logger_thread,
                      args=(db, state, str(db_path), sample_sec, backup_sec,
-                           window_sec),
+                           retain_sec),
                      daemon=True).start()
 
     colors = {k: tuple(v) for k, v in cfg['colors'].items()}
     refresh = 1.0 / dcfg.get('refresh_hz', 4)
-    page_sec = dcfg.get('page_seconds', 5)
     hist = ([], [], [])
     next_load = 0.0
     layout = {'scale_w': dcfg.get('scale_w', 3000)}
@@ -238,8 +354,8 @@ def main():
             next_load = t0 + 30
         draw_round(img, d, fonts, colors, state.snapshot(),
                    day_totals(db, state.snapshot_kwh()),
-                   state.snapshot_battery(), hist,
-                   int(t0 / page_sec) % 2, layout)
+                   state.snapshot_battery(), hist, layout,
+                   int(t0 * 3) % 3)
         fb.show(img)
         dt = time.time() - t0
         if dt < refresh:

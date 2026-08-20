@@ -11,8 +11,8 @@ Requires=hyperpixel2r-init.service
 Type=simple
 # root est requis pour ecrire dans /dev/fb0 et desactiver la veille console.
 User=root
-WorkingDirectory=/home/pi/energy-dashboard
-ExecStart=/usr/bin/python3 /home/pi/energy-dashboard/hyperpixel_dashboard.py /home/pi/energy-dashboard/config_hyperpixel.yaml
+WorkingDirectory=/home/pi/rgb-matrix-energy-dashboard
+ExecStart=/usr/bin/python3 /home/pi/rgb-matrix-energy-dashboard/hyperpixel_dashboard.py /home/pi/rgb-matrix-energy-dashboard/config_hyperpixel.yaml
 Restart=on-failure
 RestartSec=10
 KillSignal=SIGTERM

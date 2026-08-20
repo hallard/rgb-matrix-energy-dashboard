@@ -6,7 +6,7 @@ display:
   device: /dev/fb0
   refresh_hz: 4          # 4 images/s suffisent et menagent le Zero W
   page_seconds: 5        # alternance batterie / bilan du jour
-  history_cols: 120      # points d'historique traces dans le cadran
+  history_cols: 288      # 288 x 5 min = 24 h affichees
   scale_w: 3000          # pleine echelle des anneaux, en watts
   fonts:
     path: /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
@@ -14,10 +14,11 @@ display:
     big:   34            # solaire et reseau
     mid:   22            # unite de la valeur centrale
     small: 18            # unites secondaires, bilan du jour
-    tiny:  14            # etiquettes
+    tiny:  16            # etiquettes
+    bottom: 26           # bilan du jour et batterie, en bas du cadran
 
 mqtt:
-  host: 192.168.1.10
+  host: 192.168.1.4
   port: 1883
   username: CHANGE_ME
   password: CHANGE_ME
@@ -31,6 +32,9 @@ history:
   bucket_minutes: 5
   sample_minutes: 1
   backup_minutes: 60
+  # Retention en base, independante de la fenetre affichee : permettra de
+  # naviguer entre les jours au tactile.
+  retain_days: 7
 
 # Palette OpenEnergyMonitor, completee pour le cadran rond.
 colors:
@@ -41,7 +45,8 @@ colors:
   label:    [130, 130, 130]
   bg:       [  0,   0,   0]   # noir : l'ecran est rond, le hors-disque ne doit pas se voir
   ring_bg:  [ 28,  32,  38]   # fond des anneaux de jauge
-  pv_fill:  [ 90,  78,   0]   # aire d'historique solaire, assombrie
-  use_fill: [  0,  64,  92]   # aire d'historique consommation, assombrie
-  batt_ok:  [ 50, 220,  80]
-  batt_low: [255,  60,  60]
+  batt:     [255, 150,   0]   # ambre : etat de charge batterie
+  # Aires du graphique, en RGBA : la composante alpha permet de les
+  # superposer sans que la seconde masque la premiere.
+  pv_area:  [255, 175,   0, 215]   # jaune ambre, proche de la batterie
+  use_area: [  0, 145, 225, 175]   # bleu maison, aire pleine

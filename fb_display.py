@@ -5,6 +5,7 @@ dans `fbset -i` : « rgba 8/16,8/8,8/0,8/24 » signifie bleu en poids faible,
 donc un ordre BGRA en memoire. PIL sait produire cet ordre directement avec
 le mode brut « BGRX », ce qui evite toute conversion en Python.
 """
+import glob
 import os
 import re
 
@@ -37,16 +38,52 @@ class FramebufferDisplay:
         self._fb.write(img.tobytes("raw", "BGRX"))
 
     def blank(self, on):
-        """Allume ou eteint la console. Sans cela elle se met en veille au bout
-        de dix minutes et efface l'affichage."""
+        """Reveille la console. Sans cela elle se met en veille au bout de dix
+        minutes et efface l'affichage."""
         path = "/sys/class/graphics/%s/blank" % os.path.basename(self.device)
+        self._write(path, "0" if on else "4")
+
+    @staticmethod
+    def _write(path, value):
         try:
             with open(path, "w") as f:
-                f.write("0" if on else "4")
+                f.write(value)
+            return True
         except OSError:
-            pass  # necessite les droits root, sans consequence sinon
+            return False  # demande les droits root, sans consequence sinon
+
+    @staticmethod
+    def _fbcon():
+        """Console virtuelle rattachee au framebuffer, si elle existe."""
+        for node in sorted(glob.glob("/sys/class/vtconsole/vtcon*")):
+            try:
+                if "frame buffer" in open(node + "/name").read():
+                    return node
+            except OSError:
+                pass
+        return None
+
+    def takeover(self):
+        """Detache la console texte du framebuffer.
+
+        Sans cela le curseur clignotant du prompt de login continue de se
+        redessiner par-dessus l'affichage : on voit un tiret parasite
+        reapparaitre a intervalle regulier, au meme endroit.
+        """
+        node = self._fbcon()
+        self._detached = bool(node) and self._write(node + "/bind", "0")
+        return self._detached
+
+    def release(self):
+        """Rend le framebuffer a la console texte."""
+        if getattr(self, "_detached", False):
+            node = self._fbcon()
+            if node:
+                self._write(node + "/bind", "1")
+            self._detached = False
 
     def close(self):
+        self.release()
         try:
             self._fb.close()
         except OSError:
