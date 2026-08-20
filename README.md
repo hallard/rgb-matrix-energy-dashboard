@@ -22,6 +22,11 @@ renders:
   - **Daily energy** — Conso / Export / Prod PV, each shown as **rounded kWh
     + matching ratio %** (Reseau / Export / Direct), computed as the delta of
     the cumulative kWh counters since midnight.
+- **Night mode**: an optional MQTT ON/OFF topic can blank the panel (great to
+  kill the glow at night) while MQTT, history and daily totals keep running in
+  the background. A short heartbeat on the four corners shows the panel is
+  still alive: **green** when the network is up, **red** (and faster) when it
+  isn't.
 
 Built for the Raspberry Pi Zero 2W with the
 [Adafruit RGB Matrix HAT (PWM)](https://www.adafruit.com/product/2345).
@@ -168,6 +173,22 @@ Typical EcoFlow aggregate payload:
 | `batt`       | %    | Battery state of charge                                     | Left (battery icon fill level + numeric SOC %) |
 | `power_watt` | W    | **Signed** battery flow: `> 0` = discharge (red ↑), `< 0` = charge (green ↓), `0` shows the value without an arrow | Centre |
 | `input_kwh`  | kWh  | Cumulative charged counter (lifetime, displayed as-is, rounded) | Right (rounded int + small `kWh`) |
+
+### Optional: `display_power` — night mode ON/OFF
+
+If `mqtt.topics.display_power` is set, the dashboard subscribes to that topic
+and expects a **plain-text** payload (`ON` or `OFF`, case-insensitive — the
+[Tasmota `stat/<device>/POWERx` convention](https://tasmota.github.io/docs/MQTT/#status-outputs)
+works out of the box):
+
+| Payload | Effect |
+|---------|--------|
+| `ON`    | Normal rendering. |
+| `OFF`   | Panel is blanked. MQTT, history sampling and daily kWh totals keep running in the background. A short heartbeat blinks on the four corners: **green** (`250 ms on / 2 s off`) when the network is up, **red** (`250 ms on / 1 s off`) when it isn't. |
+
+The state is retained by Tasmota, so on reboot the dashboard picks up the last
+known ON/OFF value immediately. Leave `mqtt.topics.display_power` unset (or
+commented) to keep the panel always on.
 
 Topic names are configurable; see `config_sample.yaml`.
 
