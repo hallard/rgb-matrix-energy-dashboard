@@ -119,7 +119,8 @@ def battery_color(soc, colors):
     return colors['imp']
 
 
-def draw_battery(d, cx, top, soc, power, colors, font, phase=0, w=30, h=52):
+def draw_battery(d, cx, top, soc, power, colors, font, f_unit, phase=0,
+                 w=30, h=52):
     """Icone batterie verticale : chevrons de sens a gauche, corps au centre,
     pourcentage et puissance empiles a droite. L'ensemble est centre sur cx.
 
@@ -138,11 +139,14 @@ def draw_battery(d, cx, top, soc, power, colors, font, phase=0, w=30, h=52):
     l1 = "--" if soc is None else "%d%%" % round(soc)
     # Le signe de `power` (positif = decharge) sert a orienter les chevrons,
     # il n'est pas affiche : la fleche dit deja le sens.
-    l2 = "%d W" % round(abs(power)) if power else ""
+    num = "%d" % round(abs(power)) if power else ""
 
     b1 = d.textbbox((0, 0), l1, font=font)
-    b2 = d.textbbox((0, 0), l2, font=font) if l2 else (0, 0, 0, 0)
-    tw = max(b1[2] - b1[0], b2[2] - b2[0])
+    bn = d.textbbox((0, 0), num, font=font) if num else (0, 0, 0, 0)
+    bu = d.textbbox((0, 0), "W", font=f_unit) if num else (0, 0, 0, 0)
+    u_gap = 5
+    w_line2 = (bn[2] - bn[0]) + u_gap + (bu[2] - bu[0]) if num else 0
+    tw = max(b1[2] - b1[0], w_line2)
     fw, f_gap = (15, 10) if power else (0, 0)   # largeur et marge des chevrons
     gap = 14
     x = cx - (fw + f_gap + w + gap + tw) / 2
@@ -163,23 +167,31 @@ def draw_battery(d, cx, top, soc, power, colors, font, phase=0, w=30, h=52):
                                  top + h - 4), 2, fill=lvl_col)
 
     tx = x + w + gap
-    if l2:
+    if num:
         d.text((tx - b1[0], top + 2), l1, font=font, fill=lvl_col)
-        d.text((tx - b2[0], top + h / 2 + 1), l2, font=font, fill=flow_col)
+        y2 = top + h / 2 + 1
+        d.text((tx - bn[0], y2), num, font=font, fill=flow_col)
+        # Unite plus petite et grise, calee sur la base du nombre, comme pour
+        # les valeurs maison, solaire et reseau.
+        d.text((tx + (bn[2] - bn[0]) + u_gap - bu[0],
+                y2 + (bn[3] - bn[1]) - (bu[3] - bu[1])),
+               "W", font=f_unit, fill=colors['label'])
     else:
         d.text((tx - b1[0], top + h / 2 - (b1[3] - b1[1]) / 2 - b1[1]), l1,
                font=font, fill=lvl_col)
 
 
 def draw_chart(img, d, cx, cy, base_y, height, half_w, pv, use, colors, font,
-               clip_r):
+               clip_r, axis_w=38):
     """Historique : production et consommation, toutes deux en aires pleines.
+
+    Une bande de `axis_w` est reservee a gauche pour les graduations : dessinees
+    par-dessus les aires elles etaient illisibles, le trace commence donc apres.
 
     Les aires sont peintes sur un calque RGBA puis composees en transparence.
     Dessinees directement l'une sur l'autre, la seconde masquerait la premiere
-    partout ou elle est plus haute. Le calque se limite a la bande du
-    graphique : composer 480x480 a chaque image serait inutilement couteux sur
-    un ARMv6.
+    partout ou elle est plus haute. Le calque se limite a la bande du graphique :
+    composer 480x480 a chaque image serait inutilement couteux sur un ARMv6.
 
     Chaque trait est borne a la corde du cercle a sa propre hauteur : sur un
     ecran rond la largeur utile diminue des qu'on s'ecarte du centre, et un
@@ -195,21 +207,27 @@ def draw_chart(img, d, cx, cy, base_y, height, half_w, pv, use, colors, font,
     def half_at(y):
         return min(half_w, chord(clip_r, abs(y - cy)) - 8)
 
+    hw_base = half_at(base_y)
+    plot_l = cx - hw_base + axis_w
+    plot_r = cx + hw_base
+
     level = step
     while level <= top + 1e-6:
         y = base_y - (level / top) * height
         hw = half_at(y)
-        d.line((cx - hw, y, cx + hw, y), fill=colors['grid'], width=1)
-        d.text((cx - hw + 3, y - 13), fmt_axis(level), font=font,
-               fill=colors['label'])
+        x_end = min(plot_r, cx + hw)
+        if x_end > plot_l:
+            d.line((plot_l, y, x_end, y), fill=colors['grid'], width=1)
+        txt = fmt_axis(level)
+        b = d.textbbox((0, 0), txt, font=font)
+        d.text((plot_l - 6 - (b[2] - b[0]) - b[0], y - (b[3] - b[1]) / 2 - b[1]),
+               txt, font=font, fill=colors['label'])
         level += step
 
-    hw_base = half_at(base_y)
-    d.line((cx - hw_base, base_y, cx + hw_base, base_y),
-           fill=colors['label'], width=1)
+    d.line((plot_l, base_y, plot_r, base_y), fill=colors['label'], width=1)
 
-    x0, y0 = int(cx - hw_base) - 2, int(base_y - height) - 2
-    x1, y1 = int(cx + hw_base) + 2, int(base_y) + 2
+    x0, y0 = int(plot_l) - 2, int(base_y - height) - 2
+    x1, y1 = int(plot_r) + 2, int(base_y) + 2
     layer = Image.new('RGBA', (x1 - x0, y1 - y0), (0, 0, 0, 0))
     ld = ImageDraw.Draw(layer)
 
@@ -217,12 +235,12 @@ def draw_chart(img, d, cx, cy, base_y, height, half_w, pv, use, colors, font,
         serie = list(serie or [])
         if len(serie) < 2:
             return
-        stepx = (2 * hw_base) / (len(serie) - 1)
+        stepx = (plot_r - plot_l) / (len(serie) - 1)
         pts = []
         for i, v in enumerate(serie):
             y = base_y - (abs(v) / top) * height
             hw = half_at(y)
-            x = min(max(cx - hw_base + i * stepx, cx - hw), cx + hw)
+            x = min(max(plot_l + i * stepx, plot_l), min(plot_r, cx + hw))
             pts.append((x - x0, y - y0))
         ld.polygon(pts + [(pts[-1][0], base_y - y0), (pts[0][0], base_y - y0)],
                    fill=rgba)
@@ -272,15 +290,21 @@ def draw_round(img, d, fonts, colors, snap, day, batt, hist, cfg,
             (("Conso", day_use, colors['use']),
              ("Prod", day_prod, colors['pv']),
              ("Export", day_exp, colors['exp']))):
-        x = cx + (i - 1) * 88
-        centered(d, x, cy + 100, name, f_tiny, colors['label'])
-        centered(d, x, cy + 118,
-                 fmt_kwh(val) if val is not None else "--", f_bottom, col)
+        # Ecartement calcule sur la corde a cette hauteur : environ 203 px de
+        # demi-largeur, pour trois blocs de ~96 px avec leur unite.
+        x = cx + (i - 1) * 130
+        centered(d, x, cy + 94, name, f_tiny, colors['label'])
+        # Meme traitement que les valeurs du haut : unite plus petite et grise,
+        # calee sur la base du nombre.
+        value_unit(d, x, cy + 112,
+                   fmt_kwh(val) if val is not None else "--", "kWh",
+                   f_bottom, f_tiny, col, colors['label'])
 
     # Batterie au plus bas : le bloc fait 144 px de large, or a cette hauteur
     # la corde se referme vite. Mesure faite, y + 166 laisse 1 px de marge sous
     # le texte avant le bord utile du disque.
-    draw_battery(d, cx, cy + 166, soc, bpower, colors, f_bottom, phase)
+    draw_battery(d, cx, cy + 166, soc, bpower, colors, f_bottom,
+                 f_small, phase)
 
     # La dalle est ronde : ce qui deborde du disque serait dessine dans le vide.
     d.ellipse((-3, -3, img.size[0] + 3, img.size[1] + 3),
