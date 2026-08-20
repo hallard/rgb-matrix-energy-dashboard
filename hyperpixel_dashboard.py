@@ -275,7 +275,7 @@ def draw_night_tick(d, cx, cy, r, col, second):
 # --------------------------------------------------------------------------
 
 def draw_round(img, d, fonts, colors, snap, day, batt, hist, cfg,
-               phase=0):
+               phase=0, day_offset=0):
     """Sans anneaux de jauge : les valeurs sont deja lisibles en chiffres, et
     la bordure recuperee profite au graphique, qui est l'element principal."""
     f_huge, f_big, f_mid, f_small, f_tiny, f_bottom = fonts
@@ -318,11 +318,22 @@ def draw_round(img, d, fonts, colors, snap, day, batt, hist, cfg,
                    fmt_kwh(val) if val is not None else "--", "kWh",
                    f_bottom, f_tiny, col, colors['label'])
 
-    # Batterie au plus bas : le bloc fait 144 px de large, or a cette hauteur
-    # la corde se referme vite. Mesure faite, y + 166 laisse 1 px de marge sous
-    # le texte avant le bord utile du disque.
-    draw_battery(d, cx, cy + 166, soc, bpower, colors, f_bottom,
-                 f_small, phase)
+    if day_offset:
+        # Journee passee : la batterie est une valeur instantanee, elle n'a
+        # aucun sens ici. On met la date a sa place, en ambre pour signaler
+        # qu'on ne regarde pas le direct.
+        when = time.localtime(time.time() + day_offset * 86400)
+        jours = ("LUN", "MAR", "MER", "JEU", "VEN", "SAM", "DIM")
+        centered(d, cx, cy + 172,
+                 "%s %02d/%02d   J%+d" % (jours[when.tm_wday], when.tm_mday,
+                                          when.tm_mon, day_offset),
+                 f_bottom, colors['batt'])
+    else:
+        # Batterie au plus bas : le bloc fait 144 px de large, or a cette
+        # hauteur la corde se referme vite. Mesure faite, y + 166 laisse 1 px
+        # de marge sous le texte avant le bord utile du disque.
+        draw_battery(d, cx, cy + 166, soc, bpower, colors, f_bottom,
+                     f_small, phase)
 
     # La dalle est ronde : ce qui deborde du disque serait dessine dans le vide.
     d.ellipse((-3, -3, img.size[0] + 3, img.size[1] + 3),
@@ -396,8 +407,15 @@ def main():
     night_style = dcfg.get('night_style', 'clock')
     touch = TouchWatcher()
     touch.start()
-    last_taps = touch.taps
     logging.info("tactile : %s", touch.device or "absent")
+
+    # Navigation dans l'historique : 0 = maintenant, -1 = la veille, etc.
+    # Bornee par la retention, inutile de remonter au-dela de ce qui est garde.
+    day_offset = 0
+    max_back = int(cfg['history'].get('retain_days', 7)) - 1
+    back_until = 0.0
+    RETURN_LIVE = 60.0   # retour automatique au direct, pour ne pas rester
+                         # bloque sur une vieille journee
     bl_off = dcfg.get('night_backlight_off', False)
     night_r = fb.width / 2 - 16
 
@@ -407,8 +425,8 @@ def main():
         if not state.display_on:
             # Ecran coupe par le topic MQTT. Les fils MQTT et journalisation
             # continuent : l'historique reste enregistre pendant la nuit.
-            if touch.taps != last_taps:
-                last_taps = touch.taps
+            if touch.pop():
+                # De nuit, n'importe quel geste bascule la presentation.
                 night_style = 'dot' if night_style == 'clock' else 'clock'
                 night_key = None   # force le redessin immediat
                 logging.info("mode nuit -> %s", night_style)
@@ -444,13 +462,33 @@ def main():
             if bl_off:
                 fb.backlight(True)
 
+        moved = False
+        while True:
+            g = touch.pop()
+            if not g:
+                break
+            if g == 'right':                       # vers la droite : reculer
+                day_offset = max(day_offset - 1, -max_back)
+                moved = True
+            elif g == 'left':
+                day_offset = min(day_offset + 1, 0)
+                moved = True
+            elif g == 'tap' and day_offset:        # un tap ramene au direct
+                day_offset, moved = 0, True
+        if moved:
+            back_until = t0 + RETURN_LIVE if day_offset else 0.0
+            next_load = 0.0
+        elif back_until and t0 > back_until:
+            day_offset, back_until, next_load = 0, 0.0, 0.0
+
         if t0 >= next_load:
-            hist = load_history(db, bucket_min, hist_cols)
+            end = None if day_offset == 0 else t0 + day_offset * 86400
+            hist = load_history(db, bucket_min, hist_cols, end)
             next_load = t0 + 30
         draw_round(img, d, fonts, colors, state.snapshot(),
                    day_totals(db, state.snapshot_kwh()),
                    state.snapshot_battery(), hist, layout,
-                   int(t0 * 3) % 3)
+                   int(t0 * 3) % 3, day_offset)
         fb.show(img)
         dt = time.time() - t0
         if dt < refresh:

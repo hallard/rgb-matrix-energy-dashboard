@@ -130,9 +130,14 @@ def persist_to_disk(ram_db, disk_path):
         logging.error("Backup failed: %s", e)
 
 
-def load_history(db, bucket_minutes, buckets):
-    """1 column = `bucket_minutes` minutes, total window = buckets*bucket_minutes."""
-    now = int(time.time())
+def load_history(db, bucket_minutes, buckets, end=None):
+    """1 column = `bucket_minutes` minutes, total window = buckets*bucket_minutes.
+
+    `end` is the right edge of the window as a unix timestamp; it defaults to
+    now. Passing an earlier value scrolls the window back through the retained
+    history, which is what the round dashboard uses to browse previous days.
+    """
+    now = int(end if end is not None else time.time())
     bucket_sec = bucket_minutes * 60
     since = now - buckets * bucket_sec
     pv = [0.0] * buckets
