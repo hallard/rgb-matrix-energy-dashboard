@@ -82,6 +82,20 @@ class FramebufferDisplay:
                 self._write(node + "/bind", "1")
             self._detached = False
 
+    def backlight(self, on):
+        """Allume ou eteint le retroeclairage.
+
+        Contrairement a une matrice LED, cette dalle a un retroeclairage pilote
+        par GPIO, expose dans /sys/class/backlight. Il est binaire : la dalle
+        n'annonce qu'un seul niveau de luminosite, on ne peut donc pas la
+        tamiser, seulement l'eteindre.
+        """
+        done = False
+        for node in glob.glob("/sys/class/backlight/*"):
+            done |= self._write(node + "/bl_power", "0" if on else "4")
+            self._write(node + "/brightness", "1" if on else "0")
+        return done
+
     def close(self):
         self.release()
         try:

@@ -26,6 +26,9 @@ mqtt:
   topics:
     home: energy/home
     battery: energy/ecoflow/batteries/aggregate
+    # Interrupteur d ecran, texte brut ON/OFF (topic Tasmota stat/...).
+    # Sur OFF la dalle passe en mode nuit ; MQTT et historique continuent.
+    display_power: stat/your-tasmota/POWER
 
 history:
   db_path: /home/pi/energy-dashboard/history.db

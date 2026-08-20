@@ -21,7 +21,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from energy_dashboard import (State, day_totals, fmt_axis, fmt_kwh, init_db,
                               load_history, logger_thread, mqtt_thread,
-                              nice_step, persist_to_disk)
+                              network_up, nice_step, persist_to_disk)
 from fb_display import FramebufferDisplay
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -252,6 +252,20 @@ def draw_chart(img, d, cx, cy, base_y, height, half_w, pv, use, colors, font,
         (x0, y0))
 
 
+def draw_heartbeat(d, cx, cy, r, col):
+    """Quatre points sur les diagonales du disque.
+
+    La version matrice les place aux quatre coins ; sur une dalle ronde les
+    coins sont hors du cercle et donc invisibles. Les diagonales donnent le
+    meme repere visuel, a l'interieur de la zone affichee.
+    """
+    off = r * 0.707   # cos(45 degres)
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            d.ellipse((cx + sx * off - 4, cy + sy * off - 4,
+                       cx + sx * off + 4, cy + sy * off + 4), fill=col)
+
+
 # --------------------------------------------------------------------------
 # Mise en page
 # --------------------------------------------------------------------------
@@ -350,6 +364,7 @@ def main():
     if dcfg.get('take_over_console', True):
         logging.info("console texte detachee : %s", fb.takeover())
     atexit.register(fb.release)
+    atexit.register(lambda: fb.backlight(True))
     logging.info("framebuffer %dx%d", fb.width, fb.height)
 
     fcfg = dcfg['fonts']
@@ -371,8 +386,44 @@ def main():
     next_load = 0.0
     layout = {'scale_w': dcfg.get('scale_w', 3000)}
 
+    # Mode nuit : cadences reprises de la version matrice.
+    NIGHT_ON = 0.25            # duree de l'impulsion
+    NIGHT_GAP_OK = 2.0         # silence quand le reseau repond
+    NIGHT_GAP_DOWN = 1.0       # silence plus court, en rouge, s'il est tombe
+    night_key = None
+    bl_off = dcfg.get('night_backlight_off', False)
+    night_r = fb.width / 2 - 16
+
     while True:
         t0 = time.time()
+
+        if not state.display_on:
+            # Ecran coupe par le topic MQTT. Les fils MQTT et journalisation
+            # continuent : l'historique reste enregistre pendant la nuit.
+            net = network_up()
+            period = NIGHT_ON + (NIGHT_GAP_OK if net else NIGHT_GAP_DOWN)
+            on = (t0 % period) < NIGHT_ON
+            key = (on, net, bl_off)
+            if key != night_key:
+                if bl_off:
+                    # Dalle vraiment eteinte : le battement serait invisible,
+                    # on ne dessine donc rien.
+                    fb.backlight(False)
+                else:
+                    d.rectangle((0, 0, fb.width, fb.height), fill=colors['bg'])
+                    if on:
+                        draw_heartbeat(d, fb.width / 2, fb.height / 2, night_r,
+                                       colors['exp'] if net else colors['imp'])
+                    fb.show(img)
+                night_key = key
+            time.sleep(0.05)   # < NIGHT_ON, pour ne pas rater l'impulsion
+            continue
+
+        if night_key is not None:
+            night_key = None
+            if bl_off:
+                fb.backlight(True)
+
         if t0 >= next_load:
             hist = load_history(db, bucket_min, hist_cols)
             next_load = t0 + 30
