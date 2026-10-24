@@ -13,6 +13,7 @@ Usage: sudo ./energy_dashboard.py [config.yaml]
 import atexit
 import json
 import logging
+import os
 import signal
 import sqlite3
 import sys
@@ -120,7 +121,23 @@ def init_db(disk_path):
 
 
 def persist_to_disk(ram_db, disk_path):
-    """Full dump RAM -> disk file (atomic via backup API)."""
+    """Full dump RAM -> disk file (atomic via backup API).
+
+    Refuse d ecraser un historique par une base vide. Si le support n etait pas
+    disponible au demarrage, la base part vide et ce dump la graverait
+    par-dessus les donnees : l ecriture reussirait parfaitement et l historique
+    serait perdu sans la moindre erreur. Le cas devient courant des que le
+    fichier vit sur un montage reseau.
+    """
+    try:
+        rows = ram_db.execute("select count(*) from history").fetchone()[0]
+    except sqlite3.Error:
+        rows = None
+    if not rows and os.path.exists(str(disk_path)) \
+            and os.path.getsize(str(disk_path)) > 0:
+        logging.error("Backup refuse : base en RAM vide, %s ne l est pas",
+                      disk_path)
+        return
     try:
         disk = sqlite3.connect(str(disk_path))
         ram_db.backup(disk)
